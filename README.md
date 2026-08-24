@@ -16,21 +16,29 @@
 
 ## 安装
 
+> 本插件**零 npm 依赖**，分发完全走 GitHub，无需 npm registry。仓库：
+> `https://github.com/yangyazi/dsh-taskboard`（release 见 `https://github.com/yangyazi/dsh-taskboard/releases`）
+
 ```bash
-# 1) 加入 web profile 依赖（本地开发：file:<插件目录>；npm 发布后：包名）
-cd ~/.dsh/profiles/web
-pnpm add file:<本插件目录>
+# 方式一（推荐）：GitHub tarball 直接安装（等价 npm 包安装，走 GitHub）
+dsh plugin --profile web add https://github.com/yangyazi/dsh-taskboard/archive/refs/tags/v0.1.0.tar.gz
 
-# 2) 注册行（cordis.patch.yml 追加）
-#   - insert:
-#       - id: taskboard
-#         name: 'dsh-taskboard'
-#         config: {}
+# 方式二：clone 后按本地目录安装
+git clone https://github.com/yangyazi/dsh-taskboard
+cd ~/.dsh/profiles/web && pnpm add file:<clone 路径>
 
-# 3) 客户端改动后重新打包
-cd <本插件目录> && npm run build:client
+# 两种方式装完后都要做（方式一装完包名是 dsh-taskboard，注册行同名）：
+# 1) 若需要源码改动后重新打包：cd <插件目录> && npm run build:client
+# 2) 重启 dsh web 生效
+```
 
-# 4) 重启 dsh web 生效
+注册行（`cordis.patch.yml` 追加，`<包名>` 换成实际安装的包名）：
+
+```yaml
+- insert:
+    - id: taskboard
+      name: '<包名>'   # 方式一装的是 dsh-taskboard
+      config: {}
 ```
 
 > 说明：`file:` 方式安装时，改动源码后需重新 `pnpm add -f file:<目录>` 或同步文件到
