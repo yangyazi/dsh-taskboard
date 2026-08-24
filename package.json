@@ -1,0 +1,33 @@
+{
+  "name": "dsh-taskboard",
+  "version": "0.1.0",
+  "description": "DSH web plugin: a lightweight Jira-like task board (repo/feature tasks, status/priority/progress, review & test status, notes timeline, session link + one-click resume). JSON-file storage, vanilla JS client — no SQLite, no framework.",
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "client-dist"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build:client": "esbuild client/src/app.js --bundle --minify --format=iife --target=es2020 --outfile=client-dist/app.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yangyazi/dsh-taskboard.git"
+  },
+  "homepage": "https://github.com/yangyazi/dsh-taskboard",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek",
+    "deepseek-harness",
+    "taskboard",
+    "kanban",
+    "jira",
+    "cordis"
+  ],
+  "bugs": {
+    "url": "https://github.com/yangyazi/dsh-taskboard/issues"
+  }
+}
