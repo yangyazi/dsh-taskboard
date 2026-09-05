@@ -36,6 +36,26 @@ cd <本插件目录> && npm run build:client
 > 说明：`file:` 方式安装时，改动源码后需重新 `pnpm add -f file:<目录>` 或同步文件到
 > profile 的 node_modules 副本（`file:` 依赖是复制/硬链接，不自动跟随源文件变更）。
 
+## 设计决策 / 范围变更（重要）
+
+本插件是**轻量 JSON 复刻**，并非最初计划的 `@ttmouse/dsh-taskboard@0.5.0`
+（SQLite + Gantt/工作流/仪表盘/AI 对话）。原因、砍掉的能力与审批详见
+[`docs/decisions/ADR-0001-scope-deviation.md`](docs/decisions/ADR-0001-scope-deviation.md)。
+
+## 技能（manage-taskboard）
+
+随包携带 DSH 技能 `vendor/skills/manage-taskboard`（含标准 YAML frontmatter）。
+插件加载时会把它注册进宿主 `ctx.skills`，因此无论 `npm` 包还是 `file:` 本地链接安装，
+模型都能在任务会话里用 `manage-taskboard` 技能操作看板。手工放到任一技能根
+（如 `<项目>/.agents/skills` 或 `$DSH_HOME/skills`）同样可被 DSH 发现。
+
+## 数据可靠性（并发 / 损坏）
+
+所有写入先经过进程内写队列，再用 advisory lock dir 串行化（避免两个 `dsh web`
+共享同一 `$DSH_HOME` 时互相丢更新）；数据文件带单调递增 `version`。数据文件一旦
+损坏会被隔离到 `taskboard.json.bak-<时间戳>` 并返回可读错误——**绝不静默读成空数组
+再覆盖清空**。多实例长期建议为每个实例配置独立 `storePath`，勿共享同一数据文件。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -67,6 +87,9 @@ cd <本插件目录> && npm run build:client
 
 | 路径 | 说明 |
 | --- | --- |
-| `lib/index.js` | 宿主插件（API + 注入） |
+| `lib/index.js` | 宿主插件（API + 注入 + 数据可靠层 + 技能注册） |
 | `client/src/app.js` | 客户端源码（原生 JS） |
 | `client-dist/app.js` | esbuild 产物（约 18 KB） |
+| `vendor/skills/manage-taskboard/SKILL.md` | 随包分发的 DSH 技能（含 frontmatter） |
+| `docs/decisions/ADR-0001-scope-deviation.md` | 与原方案的范围变更记录 |
+| `test/*.test.mjs` | 并发写 / 损坏隔离 / 技能注册回归测试（`npm test`） |

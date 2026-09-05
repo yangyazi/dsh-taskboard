@@ -1,16 +1,23 @@
 {
   "name": "dsh-taskboard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH web plugin: a lightweight Jira-like task board (repo/feature tasks, status/priority/progress, review & test status, notes timeline, session link + one-click resume). JSON-file storage, vanilla JS client — no SQLite, no framework.",
   "type": "module",
   "main": "lib/index.js",
   "files": [
     "lib",
-    "client-dist"
+    "client-dist",
+    "vendor/skills"
   ],
+  "dsh": {
+    "skills": {
+      "vendorDir": "vendor/skills"
+    }
+  },
   "license": "MIT",
   "scripts": {
-    "build:client": "esbuild client/src/app.js --bundle --minify --format=iife --target=es2020 --outfile=client-dist/app.js"
+    "build:client": "esbuild client/src/app.js --bundle --minify --format=iife --target=es2020 --outfile=client-dist/app.js",
+    "test": "node test/persistence_concurrency.test.mjs && node test/skill_registration.test.mjs"
   },
   "repository": {
     "type": "git",

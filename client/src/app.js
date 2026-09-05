@@ -245,6 +245,15 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 @keyframes dsh-tb-blink{0%,100%{opacity:1}50%{opacity:.45}}
 .dsh-tb-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:9999;background:#1b2127;border:1px solid #3478f6;color:#e6edf3;border-radius:9px;padding:9px 20px;font-size:12.5px;font-weight:600;box-shadow:0 6px 24px rgba(0,0,0,.5);animation:dsh-tb-toast .18s ease;pointer-events:none}
 @keyframes dsh-tb-toast{from{opacity:0;transform:translateX(-50%) translateY(8px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+.dsh-tb-picklist{display:flex;flex-direction:column;gap:10px;max-height:48vh;overflow-y:auto;margin-top:10px}
+.dsh-tb-pick-group{border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:9px;overflow:hidden}
+.dsh-tb-pick-grouphead{display:flex;justify-content:space-between;align-items:center;background:var(--dsw-alias-bg-layer-2,#1b2127);padding:6px 11px;font-size:11.5px;font-weight:700;color:var(--dsw-alias-label-secondary,#9aa7b4);letter-spacing:.3px}
+.dsh-tb-pick-grouphead b{color:#bc8cff}
+.dsh-tb-pick-item{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 11px;border-top:1px solid var(--dsw-alias-border-l2,#2a3138);cursor:pointer;transition:background .12s}
+.dsh-tb-pick-item:hover{background:var(--dsw-alias-bg-layer-2,#1b2127)}
+.dsh-tb-pick-item .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.dsh-tb-pick-item .m{flex:none;font-size:10.5px;color:var(--dsw-alias-label-tertiary,#768390)}
+.dsh-tb-empty{padding:14px;text-align:center;color:var(--dsw-alias-label-tertiary,#768390);font-size:12px}
 </style>`;
 
 	document.documentElement.insertAdjacentHTML("beforeend", STYLE);
@@ -733,6 +742,57 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	}
 
 	// ---- detail modal ------------------------------------------------------
+	// 选择会话关联：搜索 + 按工作区分组 + 按更新时间排序
+	function openSessionPicker(taskId, onLinked) {
+		api("/sessions").then((fresh) => {
+			const pickMask = document.createElement("div");
+			pickMask.className = "dsh-tb-modal-mask";
+			pickMask.innerHTML = `<div class="dsh-tb-modal" style="width:min(600px,92vw)">
+				<h3>选择会话关联</h3>
+				<div class="dsh-tb-field"><input id="tb-pick-search" placeholder="搜索会话标题…" /></div>
+				<div class="dsh-tb-picklist" id="tb-pick-list">加载中…</div>
+				<div class="dsh-tb-actions"><button data-act="cancel">取消</button></div>
+			</div>`;
+			document.body.appendChild(pickMask);
+			const allSessions = fresh.sessions || sessions;
+			const listEl = $("#tb-pick-list", pickMask);
+			const render = (q) => {
+				const ql = String(q || "").trim().toLowerCase();
+				const list = allSessions.filter((s) => !ql || String(s.title || "").toLowerCase().includes(ql));
+				const groups = {};
+				for (const s of list) { const k = s.repo || "（未指定）"; (groups[k] ||= []).push(s); }
+				const html = Object.entries(groups)
+					.sort((a, b) => b[1].length - a[1].length)
+					.map(([repo, items]) => {
+						items.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+						return `<div class="dsh-tb-pick-group">
+							<div class="dsh-tb-pick-grouphead">${esc(repoShort(repo))} <b>${items.length}</b></div>
+							${items.map((s) => `<div class="dsh-tb-pick-item" data-sid="${esc(s.id)}">
+								<div class="t">${esc(s.title || s.id)}${s.running ? ` <span class="dsh-tb-run">● 运行中</span>` : ""}</div>
+								<div class="m">${s.updatedAt ? fmtTime(s.updatedAt) : ""}</div>
+							</div>`).join("")}
+						</div>`;
+					}).join("");
+				listEl.innerHTML = html || '<div class="dsh-tb-empty">（无匹配会话）</div>';
+				$$(".dsh-tb-pick-item", pickMask).forEach((el) => el.addEventListener("click", async () => {
+					const sid = el.dataset.sid;
+					try {
+						const { task: lk, injected, injectionNote } = await api(`/tasks/${taskId}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: sid, action: "link" }) });
+						pickMask.remove();
+						await refreshTasks();
+						onLinked(lk);
+						toast(injected ? "✓ 已关联会话（已注入任务上下文）" : (injectionNote || "已关联会话"));
+					} catch (err) { alert(`关联失败：${err.message}`); }
+				}));
+			};
+			render("");
+			$("#tb-pick-search", pickMask).addEventListener("input", () => render($("#tb-pick-search", pickMask).value));
+			$('[data-act="cancel"]', pickMask).addEventListener("click", () => pickMask.remove());
+			pickMask.addEventListener("click", (e) => { if (e.target === pickMask) pickMask.remove(); });
+			$("#tb-pick-search", pickMask).focus();
+		}).catch(() => alert("获取会话列表失败"));
+	}
+
 	async function openDetail(id) {
 		const { task } = await api(`/tasks/${id}`);
 		buildDetail(task);
@@ -781,8 +841,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 					return `<div class="dsh-tb-sess"><span class="dsh-tb-sess-title" title="${esc(sid)}">${esc(s ? s.title : sid)}${s && s.running ? ` <span class="dsh-tb-run">● 运行中</span>` : ""}</span><button data-sid="${esc(sid)}" data-act="open" class="dsh-tb-open">打开</button><button data-sid="${esc(sid)}" data-act="unlink">解除</button></div>`;
 				}).join("") || '<div class="dsh-tb-note">（未关联会话）</div>'}</div>
 				<div class="dsh-tb-row" style="margin-top:6px">
-					<select id="tb-d-sess-pick" style="flex:1">${sessOptions || '<option value="">（暂无会话）</option>'}</select>
-					<button id="tb-d-sess-link">关联</button>
+					<button id="tb-d-sess-open" style="flex:1" title="按工作区分组、按更新时间排序、可搜索">🔍 选择会话关联</button>
 					<button id="tb-d-sess-new" title="新建一个绑定到此任务的对话">＋ 新对话</button>
 				</div>
 			</div>
@@ -849,15 +908,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		$('[data-act="save"]', mask).addEventListener("click", async () => {
 			try {
 				// 保存表单字段
-				let updated = await patch(state());
-				// 若在会话下拉里选了未关联的会话，一并提交关联
-				const pick = $("#tb-d-sess-pick", mask)?.value;
-				if (pick && !(updated.sessionIds || []).includes(pick)) {
-					const r = await api(`/tasks/${id}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: pick, action: "link" }) });
-					updated = r.task;
-					await refreshTasks();
-					if (r.injectionNote && !r.injected) toast(r.injectionNote);
-				}
+				const updated = await patch(state());
 				rerender(updated);
 				toast("✓ 已保存");
 			} catch (err) { alert(`保存失败：${err.message}`); }
@@ -879,13 +930,9 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				} catch (err) { alert(`记录失败：${err.message}`); }
 			}
 		});
-		$("#tb-d-sess-link", mask).addEventListener("click", async () => {
-			const sid = $("#tb-d-sess-pick", mask).value;
-			if (!sid) return;
-			const { task: lk, injected, injectionNote } = await api(`/tasks/${id}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: sid, action: "link" }) });
-			await refreshTasks();
-			rerender(lk);
-			toast(injected ? "✓ 已关联会话（已注入任务上下文）" : (injectionNote || "已关联会话"));
+		// 🔍 选择会话关联：搜索 + 按工作区分组 + 按更新时间排序
+		$("#tb-d-sess-open", mask)?.addEventListener("click", () => {
+			openSessionPicker(id, (lk) => { mask.remove(); buildDetail(lk); });
 		});
 		$$("#tb-d-sessions [data-act]", mask).forEach((btn) => btn.addEventListener("click", async () => {
 			const sid = btn.dataset.sid;
@@ -964,4 +1011,24 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		if (target.closest(`[${ENTRY_ATTR}]`)) return;
 		if (target.closest('[data-pane="sidebar"], [class*="sidebarCol"]')) toggle(false);
 	});
+
+	// —— 会话切换后的布局修复 ——
+	// 从任务看板"新建对话/打开会话"走的是 localStorage + location.reload()。
+	// 新版 Harness 在 reload 恢复会话后，输入区偶尔处于未重排状态，表现为
+	// "点击输入框没反应，手动左右拖一下页面（触发 resize 重排）才能输入"。
+	// 这里在页面加载后派发几次 resize，等价于用户手动拖拽触发的重排。
+	function nudgeLayout() {
+		try {
+			window.dispatchEvent(new Event("resize"));
+			document.body?.dispatchEvent(new Event("resize"));
+		} catch { /* ignore */ }
+	}
+	const nudgeTimers = [150, 400, 900];
+	if (document.readyState === "loading") {
+		window.addEventListener("load", () => {
+			for (const t of nudgeTimers) setTimeout(nudgeLayout, t);
+		});
+	} else {
+		for (const t of nudgeTimers) setTimeout(nudgeLayout, t);
+	}
 })();
