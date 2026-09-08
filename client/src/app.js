@@ -582,7 +582,39 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			default: return "";
 		}
 	}
+	// 打开/继续一个会话。
+	// 优先走宿主原生「会话列表」的 in-app 切换（`open(id)`），这样不会整页 reload，
+	// 也就不会先闪一下「新建对话」页再跳到目标会话。原生 open 会同步更新
+	// dsh.sessions.current 持久化，因此刷新后仍停留在该会话。
+	// 若拿不到原生 open（结构变了/未渲染），回退到 localStorage + load 的老方式。
+	function findNativeSessionOpen() {
+		// 从 DOM 里任一会话行向上找「会话列表」所有者组件的 fiber，取其 props.open。
+		// memoizedProps 里同时具备 open + startSession 的就是该所有者（与原生侧边栏一致）。
+		const candidates = document.querySelectorAll('[class*="sessionRow"], [class*="root"]');
+		for (const el of candidates) {
+			let fiberKey = null;
+			for (const k of Object.keys(el)) if (k.startsWith("__reactFiber$")) { fiberKey = k; break; }
+			if (fiberKey === null) continue;
+			let f = el[fiberKey];
+			for (let i = 0; i < 30 && f !== null; i++) {
+				const mp = f.memoizedProps;
+				if (mp !== null && typeof mp === "object" && typeof mp.open === "function" && typeof mp.startSession === "function") {
+					return mp.open;
+				}
+				f = f.return;
+			}
+		}
+		return null;
+	}
 	function openSession(sid) {
+		try {
+			const open = findNativeSessionOpen();
+			if (typeof open === "function") {
+				open(sid);
+				return;
+			}
+		} catch { /* fall through to reload */ }
+		// 回退：持久化后整页加载
 		try { localStorage.setItem("dsh.sessions.current", JSON.stringify({ sessionId: sid })); } catch { /* ignore */ }
 		location.reload();
 	}
