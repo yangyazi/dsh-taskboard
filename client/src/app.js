@@ -104,21 +104,25 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 
 /* 侧边栏「最新对话」常驻小组件（钉在 New Session 下方、会话列表之上） */
 #dsh-recent { border-top: 1px solid var(--dsw-alias-border-l2,#2a3138); }
-.dsh-recent-head{display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:11.5px;font-weight:700;color:var(--dsw-alias-label-secondary,#9aa7b4);cursor:pointer;letter-spacing:.2px;user-select:none}
-.dsh-recent-head .arrow{font-size:9px;transition:transform .15s;color:#768390}
+.dsh-recent-head{display:flex;align-items:center;gap:6px;padding:5px 10px;font-size:11.5px;font-weight:700;color:var(--dsw-alias-label-secondary,#9aa7b4);cursor:pointer;letter-spacing:.2px;user-select:none}
+.dsh-recent-head .arrow{font-size:8px;transition:transform .15s;color:#768390}
 .dsh-recent.collapsed .dsh-recent-head .arrow{transform:rotate(-90deg)}
 .dsh-recent-head .title{flex:1}
 .dsh-recent-head .cnt{font-weight:600;font-size:10.5px;color:#79c0ff;background:#79c0ff14;border-radius:9px;padding:0 7px;flex:none}
-.dsh-recent-refresh{background:transparent;border:0;color:var(--dsw-alias-label-secondary,#9aa7b4);cursor:pointer;font-size:12px;padding:0 2px;line-height:1}
+.dsh-recent-refresh{background:transparent;border:0;color:var(--dsw-alias-label-secondary,#9aa7b4);cursor:pointer;font-size:12px;padding:0 2px;line-height:1;display:inline-flex}
 .dsh-recent-refresh:hover{color:var(--dsw-alias-label-primary,#e6edf3)}
-.dsh-recent-body{display:flex;flex-direction:column;gap:2px;padding:0 8px 6px;overflow-y:auto;scrollbar-width:thin}
-.dsh-recent-body::-webkit-scrollbar{width:6px}.dsh-recent-body::-webkit-scrollbar-thumb{background:#2c3440;border-radius:3px}
-.dsh-recent-row{display:flex;align-items:center;gap:7px;padding:5px 6px;border-radius:7px;cursor:pointer;min-width:0;transition:background .12s}
+.dsh-recent-body{display:flex;flex-direction:column;gap:1px;padding:0 6px 6px;overflow:hidden}
+/* 单个会话行：对齐原生会话行高度/内边距，标题行 + 下方灰色预览行 */
+.dsh-recent-row{display:flex;flex-direction:column;gap:1px;padding:5px 8px;border-radius:8px;cursor:pointer;min-width:0;transition:background .12s}
 .dsh-recent-row:hover{background:var(--dsw-alias-bg-layer-2,#1b2127)}
-.dsh-recent-row .dot{width:7px;height:7px;border-radius:50%;flex:none}
-.dsh-recent-row .t{flex:1;min-width:0;font-size:12px;color:var(--dsw-alias-label-primary,#e6edf3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dsh-recent-row .repo{flex:none;font-size:10px;color:#79c0ff;background:#79c0ff12;border-radius:6px;padding:0 6px;max-width:90px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dsh-recent-row .tm{flex:none;font-size:10px;color:var(--dsw-alias-label-secondary,#9aa7b4)}
+.dsh-recent-row .lbl{display:flex;align-items:center;gap:6px;min-width:0;font-size:13px;color:var(--dsw-alias-label-primary,#e6edf3)}
+.dsh-recent-row .icn{flex:none;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);width:10px;text-align:center}
+.dsh-recent-row .run{flex:none;width:7px;height:7px;border-radius:50%;background:#f2cc60;box-shadow:0 0 5px #f2cc60aa;margin-left:2px}
+.dsh-recent-row .t{flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-recent-row .meta{display:flex;align-items:center;gap:6px;min-width:0;padding-left:16px}
+.dsh-recent-row .prev{flex:1;min-width:0;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-recent-row .repo{flex:none;font-size:10px;color:#79c0ffb3;background:#79c0ff12;border-radius:6px;padding:0 6px;max-width:90px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-recent-row .tm{flex:none;font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4)}
 .dsh-recent-empty{padding:6px 8px 8px;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);text-align:center}
 
 #dsh-tb-view ::-webkit-scrollbar, .dsh-tb-modal ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -410,12 +414,17 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			return;
 		}
 		recentBody.innerHTML = list.map((s) => {
-			const color = s.running ? "#f2cc60" : "#3478f6";
-			return `<div class="dsh-recent-row" data-sid="${esc(s.id)}" title="打开并继续：${esc(s.title || s.id)}">
-				<span class="dot" style="background:${color};box-shadow:0 0 5px ${color}${s.running ? "cc" : "66"}"></span>
-				<span class="t">${esc(s.title || s.id)}${s.running ? `<span style="color:#f2cc60"> ●</span>` : ""}</span>
-				${s.repo ? `<span class="repo">${esc(repoShort(s.repo))}</span>` : ""}
-				<span class="tm">${fmtTime(s.updatedAt)}</span>
+			const title = s.title && String(s.title).trim() ? s.title : s.id;
+			return `<div class="dsh-recent-row" data-sid="${esc(s.id)}" title="打开并继续：${esc(title)}">
+				<span class="lbl">
+					${s.running ? `<span class="run"></span>` : `<span class="icn">▤</span>`}
+					<span class="t">${esc(title)}</span>
+				</span>
+				<span class="meta">
+					${s.preview ? `<span class="prev">${esc(s.preview)}</span>` : ""}
+					${s.repo ? `<span class="repo">${esc(repoShort(s.repo))}</span>` : ""}
+					<span class="tm">${fmtTime(s.updatedAt)}</span>
+				</span>
 			</div>`;
 		}).join("");
 		$$(".dsh-recent-row", recentBody).forEach((el) => el.addEventListener("click", () => {
