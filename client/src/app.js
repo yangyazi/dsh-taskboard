@@ -120,9 +120,8 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-recent-row .dot{flex:none;width:8px;height:8px;border-radius:50%}
 .dsh-recent-row .dot.run{background:#f2cc60;box-shadow:0 0 5px #f2cc60aa;animation:dsh-tb-blink 1.4s ease-in-out infinite}
 .dsh-recent-row .dot.idle{background:#3fb950;box-shadow:0 0 4px #3fb95066}
-/* 当前打开的会话：去掉状态点，行轻微高亮 + 左侧蓝条提示 */
-.dsh-recent-row.cur{background:var(--dsw-alias-bg-layer-2,#1b2127);box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l3,#232a31)}
-.dsh-recent-row.cur .t{color:var(--dsw-alias-label-secondary,#9aa7b4)}
+/* 当前打开的会话：去掉状态点，行用与原生「选中」一致的轻微底色（无边框、无缩放） */
+.dsh-recent-row.cur{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
 .dsh-recent-row .t{flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dsh-recent-row .meta{display:flex;align-items:center;gap:6px;min-width:0;padding-left:16px}
 .dsh-recent-row .prev{flex:1;min-width:0;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -627,6 +626,9 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		try {
 			const open = findNativeSessionOpen();
 			if (typeof open === "function") {
+				// 先同步写入目标会话，保证「最新对话」能立即把该行标为当前(无点+淡底色)。
+				// 原生 open() 之后也会持久化同一值，二者一致。
+				try { localStorage.setItem("dsh.sessions.current", JSON.stringify({ sessionId: sid })); } catch { /* ignore */ }
 				open(sid);
 				// 原位切换后：关掉任务看板（含打开的详情弹窗），让对话重新可见。
 				if (isOpen()) toggle(false);
