@@ -117,7 +117,9 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-recent-row:hover{background:var(--dsw-alias-bg-layer-2,#1b2127)}
 .dsh-recent-row .lbl{display:flex;align-items:center;gap:6px;min-width:0;font-size:13px;color:var(--dsw-alias-label-primary,#e6edf3)}
 .dsh-recent-row .icn{flex:none;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);width:10px;text-align:center}
-.dsh-recent-row .run{flex:none;width:7px;height:7px;border-radius:50%;background:#f2cc60;box-shadow:0 0 5px #f2cc60aa;margin-left:2px}
+.dsh-recent-row .dot{flex:none;width:8px;height:8px;border-radius:50%}
+.dsh-recent-row .dot.run{background:#f2cc60;box-shadow:0 0 5px #f2cc60aa;animation:dsh-tb-blink 1.4s ease-in-out infinite}
+.dsh-recent-row .dot.idle{background:#3fb950;box-shadow:0 0 4px #3fb95066}
 .dsh-recent-row .t{flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dsh-recent-row .meta{display:flex;align-items:center;gap:6px;min-width:0;padding-left:16px}
 .dsh-recent-row .prev{flex:1;min-width:0;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -415,9 +417,13 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		}
 		recentBody.innerHTML = list.map((s) => {
 			const title = s.title && String(s.title).trim() ? s.title : s.id;
+			// 状态点：运行中→黄；否则(空闲/已完成)→绿
+			const dot = s.running
+				? `<span class="dot run"></span>`
+				: `<span class="dot idle"></span>`;
 			return `<div class="dsh-recent-row" data-sid="${esc(s.id)}" title="打开并继续：${esc(title)}">
 				<span class="lbl">
-					${s.running ? `<span class="run"></span>` : `<span class="icn">▤</span>`}
+					${dot}
 					<span class="t">${esc(title)}</span>
 				</span>
 				<span class="meta">
