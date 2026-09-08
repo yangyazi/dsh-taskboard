@@ -74,8 +74,10 @@
 	// ---- styles ------------------------------------------------------------
 	const STYLE = `
 <style>
-[data-pane='conversation'],
-[class*='centerCol'] { position: relative; }
+/* 只在任务看板打开时才把对话列设为定位锚点；正常对话时不干预新版布局，
+   避免绝对定位浮层（含输入区相关）的包含块被改变导致输入被遮挡 */
+html[${ACTIVE_ATTR}] [data-pane='conversation'],
+html[${ACTIVE_ATTR}] [class*='centerCol'] { position: relative; }
 [${VIEW_ATTR}] {
   position: absolute; inset: 0; display: none; z-index: 60;
   background: var(--dsw-alias-bg-base, #0d1117); overflow: hidden;
@@ -184,6 +186,8 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-tb-ov-ws .sesslist .s{font-size:10.5px;color:#79c0ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;padding:1px 4px;border-radius:5px;transition:background .12s}
 .dsh-tb-ov-ws .sesslist .s:hover{background:#79c0ff12;text-decoration:underline}
 .dsh-tb-ov-sec{font-size:12px;font-weight:700;color:var(--dsw-alias-label-secondary,#9aa7b4);margin:16px 0 9px;letter-spacing:.3px}
+.dsh-tb-ov-sec .dsh-tb-ov-more{float:right;background:transparent;border:1px solid var(--dsw-alias-border-l2,#2a3138);color:var(--dsw-alias-label-secondary,#9aa7b4);border-radius:7px;padding:1px 9px;font-size:10.5px;font-weight:500;cursor:pointer;transition:all .15s}
+.dsh-tb-ov-sec .dsh-tb-ov-more:hover{border-color:var(--dsw-alias-border-accent,#bc8cff);color:var(--dsw-alias-label-primary,#e6edf3)}
 .dsh-tb-ov-recent{display:flex;flex-direction:column;gap:6px}
 .dsh-tb-ov-item{display:flex;align-items:center;gap:9px;background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:9px;padding:7px 11px;cursor:pointer;transition:border-color .15s,transform .12s}
 .dsh-tb-ov-item:hover{border-color:var(--dsw-alias-border-accent,#bc8cff);transform:translateX(2px)}
@@ -479,6 +483,12 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		const sessionsByRepo = {};
 		for (const s of sessions) if (s.repo) (sessionsByRepo[s.repo] ||= []).push(s);
 		const recent = [...tasks].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 10);
+		// 「最新对话」= 跨工作区按最近活跃(updatedAt)排序的最新会话，默认 15 条
+		const RECENT_SESSION_LIMIT = 15;
+		const recentSessions = [...sessions]
+			.filter((s) => s && s.updatedAt)
+			.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+			.slice(0, RECENT_SESSION_LIMIT);
 
 		const addCard = `<div class="dsh-tb-ov-stat dsh-tb-ov-add" id="dsh-tb-ov-new" title="新建任务"><div class="dsh-tb-ov-addbtn">＋ 新建任务</div></div>`;
 		const statEls = addCard + [
@@ -529,13 +539,26 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			</div>`;
 		}).join("") : '<div class="dsh-tb-empty">（暂无任务）</div>';
 
+		// 最新对话卡片（跨工作区最近活跃会话，点击打开并继续）
+		const recentSessEls = recentSessions.length ? recentSessions.map((s) => {
+			return `<div class="dsh-tb-ov-item" data-sid="${esc(s.id)}">
+				<span class="dot" style="background:${s.running ? "#f2cc60" : "#3478f6"};box-shadow:0 0 5px ${s.running ? "#f2cc60" : "#3478f6"}99"></span>
+				<span class="t">${esc(s.title || s.id)}${s.running ? ` <span class="dsh-tb-run">● 运行中</span>` : ""}</span>
+				${s.repo ? `<span class="r">${esc(repoShort(s.repo))}</span>` : ""}
+				${s.turns ? `<span class="r" style="color:var(--dsw-alias-label-tertiary,#768390)">${s.turns} 轮</span>` : ""}
+				<span class="tm">${fmtTime(s.updatedAt)}</span>
+			</div>`;
+		}).join("") : '<div class="dsh-tb-empty">（暂无对话）</div>';
+
 		const body = $("#dsh-tb-body");
 		if (!body) return;
 		body.innerHTML = `<div class="dsh-tb-ov">
 			<div class="dsh-tb-ov-stats">${statEls}</div>
+			<div class="dsh-tb-ov-sec">最新对话<button class="dsh-tb-ov-more" id="dsh-tb-ov-sess-all" title="查看全部会话">查看全部 ${sessions.length} ›</button></div>
+			<div class="dsh-tb-ov-recent" id="dsh-tb-ov-sessions">${recentSessEls}</div>
 			<div class="dsh-tb-ov-sec">工作区内容</div>
 			<div class="dsh-tb-ov-grid">${wsCards}</div>
-			<div class="dsh-tb-ov-sec">最近更新</div>
+			<div class="dsh-tb-ov-sec">最近更新任务</div>
 			<div class="dsh-tb-ov-recent">${recentEls}</div>
 		</div>`;
 		$("#dsh-tb-ov-new")?.addEventListener("click", openCreate);
@@ -557,7 +580,16 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			e.stopPropagation();
 			openSession(el.dataset.sid);
 		}));
-		$$(".dsh-tb-ov-item").forEach((el) => el.addEventListener("click", () => openDetail(el.dataset.id)));
+		$$(".dsh-tb-ov-item").forEach((el) => el.addEventListener("click", () => { if (el.dataset.id) openDetail(el.dataset.id); }));
+		// 最新对话：点击条目打开并继续该会话
+		$$("#dsh-tb-ov-sessions .dsh-tb-ov-item").forEach((el) => el.addEventListener("click", (e) => {
+			e.stopPropagation();
+			openSession(el.dataset.sid);
+		}));
+		$("#dsh-tb-ov-sess-all")?.addEventListener("click", (e) => {
+			e.stopPropagation();
+			openAllSessions();
+		});
 	}
 
 	// ---- render: kanban ----------------------------------------------------
@@ -793,6 +825,46 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		}).catch(() => alert("获取会话列表失败"));
 	}
 
+	// 全部会话弹窗：跨工作区按最近活跃排序，搜索 + 点击打开继续
+	function openAllSessions() {
+		api("/sessions").then((fresh) => {
+			const mask = document.createElement("div");
+			mask.className = "dsh-tb-modal-mask";
+			mask.innerHTML = `<div class="dsh-tb-modal" style="width:min(620px,92vw)">
+				<h3>全部对话（${(fresh.sessions || []).length}）</h3>
+				<div class="dsh-tb-field"><input id="tb-sessall-search" placeholder="搜索标题 / 仓库…" /></div>
+				<div class="dsh-tb-picklist" id="tb-sessall-list">加载中…</div>
+				<div class="dsh-tb-actions"><button data-act="cancel">关闭</button></div>
+			</div>`;
+			document.body.appendChild(mask);
+			const allSessions = (fresh.sessions || sessions).slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+			const listEl = $("#tb-sessall-list", mask);
+			const render = (q) => {
+				const ql = String(q || "").trim().toLowerCase();
+				const list = allSessions.filter((s) => !ql || String(s.title || "").toLowerCase().includes(ql) || String(s.repo || "").toLowerCase().includes(ql));
+				if (!list.length) { listEl.innerHTML = '<div class="dsh-tb-empty">（无匹配会话）</div>'; return; }
+				const groups = {};
+				for (const s of list) { const k = s.repo || "（未指定）"; (groups[k] ||= []).push(s); }
+				const html = Object.entries(groups).map(([repo, items]) => {
+					return `<div class="dsh-tb-pick-group">
+						<div class="dsh-tb-pick-grouphead">${esc(repoShort(repo))} <b>${items.length}</b></div>
+						${items.map((s) => `<div class="dsh-tb-pick-item" data-sid="${esc(s.id)}">
+							<div class="t">${esc(s.title || s.id)}${s.running ? ` <span class="dsh-tb-run">● 运行中</span>` : ""}</div>
+							<div class="m">${s.updatedAt ? fmtTime(s.updatedAt) : ""}</div>
+						</div>`).join("")}
+					</div>`;
+				}).join("");
+				listEl.innerHTML = html;
+				$$(".dsh-tb-pick-item", mask).forEach((el) => el.addEventListener("click", () => openSession(el.dataset.sid)));
+			};
+			render("");
+			$("#tb-sessall-search", mask).addEventListener("input", () => render($("#tb-sessall-search", mask).value));
+			$('[data-act="cancel"]', mask).addEventListener("click", () => mask.remove());
+			mask.addEventListener("click", (e) => { if (e.target === mask) mask.remove(); });
+			$("#tb-sessall-search", mask).focus();
+		}).catch(() => alert("获取会话列表失败"));
+	}
+
 	async function openDetail(id) {
 		const { task } = await api(`/tasks/${id}`);
 		buildDetail(task);
@@ -1012,23 +1084,25 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		if (target.closest('[data-pane="sidebar"], [class*="sidebarCol"]')) toggle(false);
 	});
 
-	// —— 会话切换后的布局修复 ——
-	// 从任务看板"新建对话/打开会话"走的是 localStorage + location.reload()。
-	// 新版 Harness 在 reload 恢复会话后，输入区偶尔处于未重排状态，表现为
-	// "点击输入框没反应，手动左右拖一下页面（触发 resize 重排）才能输入"。
-	// 这里在页面加载后派发几次 resize，等价于用户手动拖拽触发的重排。
-	function nudgeLayout() {
+	// —— 会话切换后的输入区恢复 ——
+	// 从任务看板"新建对话/打开会话"走 localStorage + location.reload()。新版
+	// Harness 在 reload 恢复会话后，输入区停留在未正确初始化的状态：点输入框
+	// 没反应，必须手动左右拖拽（真实改变面板宽度）后才可输入。
+	// 原因：GUI 用 ResizeObserver 监听真实几何变化，单纯派发 window resize 事件
+	// 不会改变任何元素尺寸，Observer 不触发。这里把对话列宽度真实改小 1px 再
+	// 还原——触发一次真实尺寸变化（同帧还原，无视觉闪烁），等价于用户拖拽。
+	function forceRealReflow() {
+		const col = conversationColumn();
+		if (!col || col.clientWidth === 0) return;
+		const prev = col.style.width;
 		try {
-			window.dispatchEvent(new Event("resize"));
-			document.body?.dispatchEvent(new Event("resize"));
+			col.style.width = `${col.clientWidth - 1}px`;
+			void col.offsetWidth; // 强制同步回流，确保 ResizeObserver 回调执行
+			col.style.width = prev || "";
 		} catch { /* ignore */ }
 	}
-	const nudgeTimers = [150, 400, 900];
-	if (document.readyState === "loading") {
-		window.addEventListener("load", () => {
-			for (const t of nudgeTimers) setTimeout(nudgeLayout, t);
-		});
-	} else {
-		for (const t of nudgeTimers) setTimeout(nudgeLayout, t);
-	}
+	const nudgeTimers = [300, 800, 1600];
+	const runNudges = () => { for (const t of nudgeTimers) setTimeout(forceRealReflow, t); };
+	if (document.readyState === "loading") window.addEventListener("load", runNudges);
+	else runNudges();
 })();
