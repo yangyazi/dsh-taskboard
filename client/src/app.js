@@ -120,6 +120,9 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-recent-row .dot{flex:none;width:8px;height:8px;border-radius:50%}
 .dsh-recent-row .dot.run{background:#f2cc60;box-shadow:0 0 5px #f2cc60aa;animation:dsh-tb-blink 1.4s ease-in-out infinite}
 .dsh-recent-row .dot.idle{background:#3fb950;box-shadow:0 0 4px #3fb95066}
+/* 当前打开的会话：去掉状态点，行轻微高亮 + 左侧蓝条提示 */
+.dsh-recent-row.cur{background:var(--dsw-alias-bg-layer-2,#1b2127);box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l3,#232a31)}
+.dsh-recent-row.cur .t{color:var(--dsw-alias-label-secondary,#9aa7b4)}
 .dsh-recent-row .t{flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dsh-recent-row .meta{display:flex;align-items:center;gap:6px;min-width:0;padding-left:16px}
 .dsh-recent-row .prev{flex:1;min-width:0;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -406,6 +409,12 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
 			.slice(0, RECENT_LIMIT);
 	}
+	function currentSessionId() {
+		try {
+			const v = JSON.parse(localStorage.getItem("dsh.sessions.current") || "null");
+			return v && v.sessionId ? v.sessionId : null;
+		} catch { return null; }
+	}
 	function renderRecent(all) {
 		if (recentBody === null) return;
 		const list = recentList(all);
@@ -415,13 +424,15 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			recentBody.innerHTML = '<div class="dsh-recent-empty">（暂无最近会话）</div>';
 			return;
 		}
+		const curId = currentSessionId();
 		recentBody.innerHTML = list.map((s) => {
 			const title = s.title && String(s.title).trim() ? s.title : s.id;
-			// 状态点：运行中→黄；否则(空闲/已完成)→绿
-			const dot = s.running
+			const isCur = s.id === curId;
+			// 状态点：运行中→黄；空闲/已完成→绿；当前打开的会话→不显示点（避免干扰），行高亮。
+			const dot = isCur ? "" : s.running
 				? `<span class="dot run"></span>`
 				: `<span class="dot idle"></span>`;
-			return `<div class="dsh-recent-row" data-sid="${esc(s.id)}" title="打开并继续：${esc(title)}">
+			return `<div class="dsh-recent-row${isCur ? " cur" : ""}" data-sid="${esc(s.id)}" title="打开并继续：${esc(title)}">
 				<span class="lbl">
 					${dot}
 					<span class="t">${esc(title)}</span>
@@ -617,6 +628,11 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			const open = findNativeSessionOpen();
 			if (typeof open === "function") {
 				open(sid);
+				// 原位切换后：关掉任务看板（含打开的详情弹窗），让对话重新可见。
+				if (isOpen()) toggle(false);
+				$$(".dsh-tb-modal-mask").forEach((m) => m.remove());
+				// 立即重绘「最新对话」：被打开的会话行去掉状态点、加上当前高亮。
+				refreshRecent();
 				return;
 			}
 		} catch { /* fall through to reload */ }
