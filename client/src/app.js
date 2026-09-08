@@ -414,6 +414,16 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			return v && v.sessionId ? v.sessionId : null;
 		} catch { return null; }
 	}
+	// 已读游标：记录每个会话「我看到哪了」。存 localStorage（key 前缀 dsh-tb-read）。
+	// 语义：绿点 = 该会话已产生完成回复(未运行) 且 最新更新时间晚于已读时间 → 有新内容没看。
+	// 点开该会话时把已读时间推进到当前，绿点即消失；切到别的会话不影响它的已读状态。
+	function readCursorKey(sid) { return `dsh-tb-read:${sid}`; }
+	function readCursorOf(sid) {
+		try { return Number(localStorage.getItem(readCursorKey(sid))) || 0; } catch { return 0; }
+	}
+	function markSessionRead(sid) {
+		try { localStorage.setItem(readCursorKey(sid), String(Date.now())); } catch { /* ignore */ }
+	}
 	function renderRecent(all) {
 		if (recentBody === null) return;
 		const list = recentList(all);
@@ -424,13 +434,23 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			return;
 		}
 		const curId = currentSessionId();
+		const now = Date.now();
 		recentBody.innerHTML = list.map((s) => {
 			const title = s.title && String(s.title).trim() ? s.title : s.id;
 			const isCur = s.id === curId;
-			// 状态点：运行中→黄；空闲/已完成→绿；当前打开的会话→不显示点（避免干扰），行高亮。
-			const dot = isCur ? "" : s.running
-				? `<span class="dot run"></span>`
-				: `<span class="dot idle"></span>`;
+			// 点号语义：
+			//   运行中 → 黄（模型正在生成）
+			//   已完成(未运行) 且 updatedAt > 已读游标 → 绿（有一轮回复还没看）
+			//   已读 或 无新内容 → 无点
+			let dot = "";
+			let state = "";
+			if (s.running) {
+				dot = `<span class="dot run"></span>`;
+				state = "run";
+			} else if (s.updatedAt && s.updatedAt > readCursorOf(s.id)) {
+				dot = `<span class="dot idle"></span>`;
+				state = "idle";
+			}
 			return `<div class="dsh-recent-row${isCur ? " cur" : ""}" data-sid="${esc(s.id)}" title="打开并继续：${esc(title)}">
 				<span class="lbl">
 					${dot}
@@ -623,17 +643,19 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		return null;
 	}
 	function openSession(sid) {
+		// 点开即视为已读：推进该会话的已读游标，使它的绿点(有新回复没看)消失。
+		markSessionRead(sid);
 		try {
 			const open = findNativeSessionOpen();
 			if (typeof open === "function") {
-				// 先同步写入目标会话，保证「最新对话」能立即把该行标为当前(无点+淡底色)。
+				// 先同步写入目标会话，保证「最新对话」能立即把该行标为当前。
 				// 原生 open() 之后也会持久化同一值，二者一致。
 				try { localStorage.setItem("dsh.sessions.current", JSON.stringify({ sessionId: sid })); } catch { /* ignore */ }
 				open(sid);
 				// 原位切换后：关掉任务看板（含打开的详情弹窗），让对话重新可见。
 				if (isOpen()) toggle(false);
 				$$(".dsh-tb-modal-mask").forEach((m) => m.remove());
-				// 立即重绘「最新对话」：被打开的会话行去掉状态点、加上当前高亮。
+				// 立即重绘「最新对话」：被打开的会话行去掉绿点、加上当前高亮。
 				refreshRecent();
 				return;
 			}
