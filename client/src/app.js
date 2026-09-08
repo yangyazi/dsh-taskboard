@@ -102,6 +102,25 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 [${ENTRY_ATTR}][data-icon-only] { gap: 0; justify-content: center; padding: 0; height: 36px; margin-bottom: 12px; }
 [${ENTRY_ATTR}][data-icon-only] > span:not(:first-child) { display: none; }
 
+/* 侧边栏「最新对话」常驻小组件（钉在 New Session 下方、会话列表之上） */
+#dsh-recent { border-top: 1px solid var(--dsw-alias-border-l2,#2a3138); }
+.dsh-recent-head{display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:11.5px;font-weight:700;color:var(--dsw-alias-label-secondary,#9aa7b4);cursor:pointer;letter-spacing:.2px;user-select:none}
+.dsh-recent-head .arrow{font-size:9px;transition:transform .15s;color:#768390}
+.dsh-recent.collapsed .dsh-recent-head .arrow{transform:rotate(-90deg)}
+.dsh-recent-head .title{flex:1}
+.dsh-recent-head .cnt{font-weight:600;font-size:10.5px;color:#79c0ff;background:#79c0ff14;border-radius:9px;padding:0 7px;flex:none}
+.dsh-recent-refresh{background:transparent;border:0;color:var(--dsw-alias-label-secondary,#9aa7b4);cursor:pointer;font-size:12px;padding:0 2px;line-height:1}
+.dsh-recent-refresh:hover{color:var(--dsw-alias-label-primary,#e6edf3)}
+.dsh-recent-body{display:flex;flex-direction:column;gap:2px;padding:0 8px 6px;overflow-y:auto;scrollbar-width:thin}
+.dsh-recent-body::-webkit-scrollbar{width:6px}.dsh-recent-body::-webkit-scrollbar-thumb{background:#2c3440;border-radius:3px}
+.dsh-recent-row{display:flex;align-items:center;gap:7px;padding:5px 6px;border-radius:7px;cursor:pointer;min-width:0;transition:background .12s}
+.dsh-recent-row:hover{background:var(--dsw-alias-bg-layer-2,#1b2127)}
+.dsh-recent-row .dot{width:7px;height:7px;border-radius:50%;flex:none}
+.dsh-recent-row .t{flex:1;min-width:0;font-size:12px;color:var(--dsw-alias-label-primary,#e6edf3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-recent-row .repo{flex:none;font-size:10px;color:#79c0ff;background:#79c0ff12;border-radius:6px;padding:0 6px;max-width:90px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-recent-row .tm{flex:none;font-size:10px;color:var(--dsw-alias-label-secondary,#9aa7b4)}
+.dsh-recent-empty{padding:6px 8px 8px;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);text-align:center}
+
 #dsh-tb-view ::-webkit-scrollbar, .dsh-tb-modal ::-webkit-scrollbar { width: 8px; height: 8px; }
 #dsh-tb-view ::-webkit-scrollbar-thumb, .dsh-tb-modal ::-webkit-scrollbar-thumb { background: #2c3440; border-radius: 4px; }
 #dsh-tb-view ::-webkit-scrollbar-thumb:hover, .dsh-tb-modal ::-webkit-scrollbar-thumb:hover { background: #3d4653; }
@@ -186,8 +205,6 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-tb-ov-ws .sesslist .s{font-size:10.5px;color:#79c0ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;padding:1px 4px;border-radius:5px;transition:background .12s}
 .dsh-tb-ov-ws .sesslist .s:hover{background:#79c0ff12;text-decoration:underline}
 .dsh-tb-ov-sec{font-size:12px;font-weight:700;color:var(--dsw-alias-label-secondary,#9aa7b4);margin:16px 0 9px;letter-spacing:.3px}
-.dsh-tb-ov-sec .dsh-tb-ov-more{float:right;background:transparent;border:1px solid var(--dsw-alias-border-l2,#2a3138);color:var(--dsw-alias-label-secondary,#9aa7b4);border-radius:7px;padding:1px 9px;font-size:10.5px;font-weight:500;cursor:pointer;transition:all .15s}
-.dsh-tb-ov-sec .dsh-tb-ov-more:hover{border-color:var(--dsw-alias-border-accent,#bc8cff);color:var(--dsw-alias-label-primary,#e6edf3)}
 .dsh-tb-ov-recent{display:flex;flex-direction:column;gap:6px}
 .dsh-tb-ov-item{display:flex;align-items:center;gap:9px;background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:9px;padding:7px 11px;cursor:pointer;transition:border-color .15s,transform .12s}
 .dsh-tb-ov-item:hover{border-color:var(--dsw-alias-border-accent,#bc8cff);transform:translateX(2px)}
@@ -364,6 +381,108 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		syncCollapsed();
 	}
 
+	// ---- 侧边栏「最新对话」常驻小组件 -------------------------------------
+	// 不依赖任务看板是否打开：作为一个独立块钉在左侧栏顶部（New Session /
+	// 任务看板入口之下、会话/工作区树之上），跨工作区列出最近活跃的会话，
+	// 点击任意一条即打开并继续。数据取自 taskboard 的 /sessions 索引。
+	const RECENT_LIMIT = 15;
+	let recentEl = null;       // 外层容器（含头 + 列表体）
+	let recentBody = null;
+	let recentCollapsed = false;
+	let recentRefreshTimer = null;
+
+	function recentData() {
+		return api("/sessions").then((s) => s.sessions || []).catch(() => sessions);
+	}
+	function recentList(all) {
+		return [...(all || [])]
+			.filter((s) => s && s.updatedAt)
+			.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+			.slice(0, RECENT_LIMIT);
+	}
+	function renderRecent(all) {
+		if (recentBody === null) return;
+		const list = recentList(all);
+		const countEl = $("#dsh-recent-cnt");
+		if (countEl) countEl.textContent = String(list.length);
+		if (!list.length) {
+			recentBody.innerHTML = '<div class="dsh-recent-empty">（暂无最近会话）</div>';
+			return;
+		}
+		recentBody.innerHTML = list.map((s) => {
+			const color = s.running ? "#f2cc60" : "#3478f6";
+			return `<div class="dsh-recent-row" data-sid="${esc(s.id)}" title="打开并继续：${esc(s.title || s.id)}">
+				<span class="dot" style="background:${color};box-shadow:0 0 5px ${color}${s.running ? "cc" : "66"}"></span>
+				<span class="t">${esc(s.title || s.id)}${s.running ? `<span style="color:#f2cc60"> ●</span>` : ""}</span>
+				${s.repo ? `<span class="repo">${esc(repoShort(s.repo))}</span>` : ""}
+				<span class="tm">${fmtTime(s.updatedAt)}</span>
+			</div>`;
+		}).join("");
+		$$(".dsh-recent-row", recentBody).forEach((el) => el.addEventListener("click", () => {
+			openSession(el.dataset.sid);
+		}));
+	}
+	function refreshRecent() {
+		recentData().then((all) => renderRecent(all)).catch(() => renderRecent(sessions));
+	}
+
+	function mountRecent() {
+		const root = sidebarRoot();
+		if (root === undefined) return;
+		if (recentEl === null) {
+			recentEl = document.createElement("div");
+			recentEl.id = "dsh-recent";
+			recentEl.className = "dsh-recent";
+			recentEl.innerHTML = `
+				<div class="dsh-recent-head" id="dsh-recent-head">
+					<span class="arrow">▼</span><span class="title">最新对话</span>
+					<span class="cnt" id="dsh-recent-cnt">0</span>
+					<button class="dsh-recent-refresh" id="dsh-recent-refresh" title="刷新">⟳</button>
+				</div>
+				<div class="dsh-recent-body" id="dsh-recent-body"></div>`;
+			recentBody = $("#dsh-recent-body", recentEl);
+			$("#dsh-recent-head", recentEl).addEventListener("click", () => {
+				recentCollapsed = !recentCollapsed;
+				if (recentEl) recentEl.classList.toggle("collapsed", recentCollapsed);
+				if (recentBody) recentBody.style.display = recentCollapsed ? "none" : "";
+			});
+			$("#dsh-recent-refresh", recentEl).addEventListener("click", (e) => {
+				e.stopPropagation();
+				refreshRecent();
+			});
+			renderRecent(sessions);
+			refreshRecent();
+		}
+		if (recentEl.parentElement === root) return;
+		// 插到 任务看板 入口（或 New Session 按钮）之后、会话树之前
+		const anchor = entryEl ?? newSessionButton(root);
+		root.insertBefore(recentEl, anchor?.nextElementSibling ?? null);
+		// 列表超高时内部滚动，避免把会话树挤出可视区
+		if (recentBody) {
+			recentBody.style.maxHeight = "46vh";
+			recentBody.style.overflowY = "auto";
+		}
+		const applyCollapse = () => {
+			if (recentBody) recentBody.style.display = recentCollapsed ? "none" : "";
+			if (recentEl) recentEl.classList.toggle("collapsed", recentCollapsed);
+		};
+		applyCollapse();
+		// 侧边栏收起为图标栏时隐藏整个小组件
+		const syncCollapsed = () => {
+			if (!recentEl) return;
+			if (sidebarIsCollapsed(root)) recentEl.style.display = "none";
+			else recentEl.style.display = "";
+		};
+		syncCollapsed();
+	}
+	function startRecentRefresher() {
+		if (recentRefreshTimer !== null) return;
+		recentRefreshTimer = setInterval(() => {
+			if (document.hidden) return;
+			refreshRecent();
+		}, 60000);
+	}
+
 	function bindViewEvents() {
 		$("#dsh-tb-new")?.addEventListener("click", openCreate);
 		$("#dsh-tb-refresh")?.addEventListener("click", () => refreshAll());
@@ -483,12 +602,6 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		const sessionsByRepo = {};
 		for (const s of sessions) if (s.repo) (sessionsByRepo[s.repo] ||= []).push(s);
 		const recent = [...tasks].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 10);
-		// 「最新对话」= 跨工作区按最近活跃(updatedAt)排序的最新会话，默认 15 条
-		const RECENT_SESSION_LIMIT = 15;
-		const recentSessions = [...sessions]
-			.filter((s) => s && s.updatedAt)
-			.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-			.slice(0, RECENT_SESSION_LIMIT);
 
 		const addCard = `<div class="dsh-tb-ov-stat dsh-tb-ov-add" id="dsh-tb-ov-new" title="新建任务"><div class="dsh-tb-ov-addbtn">＋ 新建任务</div></div>`;
 		const statEls = addCard + [
@@ -539,26 +652,13 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			</div>`;
 		}).join("") : '<div class="dsh-tb-empty">（暂无任务）</div>';
 
-		// 最新对话卡片（跨工作区最近活跃会话，点击打开并继续）
-		const recentSessEls = recentSessions.length ? recentSessions.map((s) => {
-			return `<div class="dsh-tb-ov-item" data-sid="${esc(s.id)}">
-				<span class="dot" style="background:${s.running ? "#f2cc60" : "#3478f6"};box-shadow:0 0 5px ${s.running ? "#f2cc60" : "#3478f6"}99"></span>
-				<span class="t">${esc(s.title || s.id)}${s.running ? ` <span class="dsh-tb-run">● 运行中</span>` : ""}</span>
-				${s.repo ? `<span class="r">${esc(repoShort(s.repo))}</span>` : ""}
-				${s.turns ? `<span class="r" style="color:var(--dsw-alias-label-tertiary,#768390)">${s.turns} 轮</span>` : ""}
-				<span class="tm">${fmtTime(s.updatedAt)}</span>
-			</div>`;
-		}).join("") : '<div class="dsh-tb-empty">（暂无对话）</div>';
-
 		const body = $("#dsh-tb-body");
 		if (!body) return;
 		body.innerHTML = `<div class="dsh-tb-ov">
 			<div class="dsh-tb-ov-stats">${statEls}</div>
-			<div class="dsh-tb-ov-sec">最新对话<button class="dsh-tb-ov-more" id="dsh-tb-ov-sess-all" title="查看全部会话">查看全部 ${sessions.length} ›</button></div>
-			<div class="dsh-tb-ov-recent" id="dsh-tb-ov-sessions">${recentSessEls}</div>
 			<div class="dsh-tb-ov-sec">工作区内容</div>
 			<div class="dsh-tb-ov-grid">${wsCards}</div>
-			<div class="dsh-tb-ov-sec">最近更新任务</div>
+			<div class="dsh-tb-ov-sec">最近更新</div>
 			<div class="dsh-tb-ov-recent">${recentEls}</div>
 		</div>`;
 		$("#dsh-tb-ov-new")?.addEventListener("click", openCreate);
@@ -581,15 +681,6 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			openSession(el.dataset.sid);
 		}));
 		$$(".dsh-tb-ov-item").forEach((el) => el.addEventListener("click", () => { if (el.dataset.id) openDetail(el.dataset.id); }));
-		// 最新对话：点击条目打开并继续该会话
-		$$("#dsh-tb-ov-sessions .dsh-tb-ov-item").forEach((el) => el.addEventListener("click", (e) => {
-			e.stopPropagation();
-			openSession(el.dataset.sid);
-		}));
-		$("#dsh-tb-ov-sess-all")?.addEventListener("click", (e) => {
-			e.stopPropagation();
-			openAllSessions();
-		});
 	}
 
 	// ---- render: kanban ----------------------------------------------------
@@ -825,46 +916,6 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		}).catch(() => alert("获取会话列表失败"));
 	}
 
-	// 全部会话弹窗：跨工作区按最近活跃排序，搜索 + 点击打开继续
-	function openAllSessions() {
-		api("/sessions").then((fresh) => {
-			const mask = document.createElement("div");
-			mask.className = "dsh-tb-modal-mask";
-			mask.innerHTML = `<div class="dsh-tb-modal" style="width:min(620px,92vw)">
-				<h3>全部对话（${(fresh.sessions || []).length}）</h3>
-				<div class="dsh-tb-field"><input id="tb-sessall-search" placeholder="搜索标题 / 仓库…" /></div>
-				<div class="dsh-tb-picklist" id="tb-sessall-list">加载中…</div>
-				<div class="dsh-tb-actions"><button data-act="cancel">关闭</button></div>
-			</div>`;
-			document.body.appendChild(mask);
-			const allSessions = (fresh.sessions || sessions).slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-			const listEl = $("#tb-sessall-list", mask);
-			const render = (q) => {
-				const ql = String(q || "").trim().toLowerCase();
-				const list = allSessions.filter((s) => !ql || String(s.title || "").toLowerCase().includes(ql) || String(s.repo || "").toLowerCase().includes(ql));
-				if (!list.length) { listEl.innerHTML = '<div class="dsh-tb-empty">（无匹配会话）</div>'; return; }
-				const groups = {};
-				for (const s of list) { const k = s.repo || "（未指定）"; (groups[k] ||= []).push(s); }
-				const html = Object.entries(groups).map(([repo, items]) => {
-					return `<div class="dsh-tb-pick-group">
-						<div class="dsh-tb-pick-grouphead">${esc(repoShort(repo))} <b>${items.length}</b></div>
-						${items.map((s) => `<div class="dsh-tb-pick-item" data-sid="${esc(s.id)}">
-							<div class="t">${esc(s.title || s.id)}${s.running ? ` <span class="dsh-tb-run">● 运行中</span>` : ""}</div>
-							<div class="m">${s.updatedAt ? fmtTime(s.updatedAt) : ""}</div>
-						</div>`).join("")}
-					</div>`;
-				}).join("");
-				listEl.innerHTML = html;
-				$$(".dsh-tb-pick-item", mask).forEach((el) => el.addEventListener("click", () => openSession(el.dataset.sid)));
-			};
-			render("");
-			$("#tb-sessall-search", mask).addEventListener("input", () => render($("#tb-sessall-search", mask).value));
-			$('[data-act="cancel"]', mask).addEventListener("click", () => mask.remove());
-			mask.addEventListener("click", (e) => { if (e.target === mask) mask.remove(); });
-			$("#tb-sessall-search", mask).focus();
-		}).catch(() => alert("获取会话列表失败"));
-	}
-
 	async function openDetail(id) {
 		const { task } = await api(`/tasks/${id}`);
 		buildDetail(task);
@@ -1066,7 +1117,9 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	// ---- bootstrap ---------------------------------------------------------
 	mountView();
 	placeEntry();
-	new MutationObserver(() => { mountView(); placeEntry(); })
+	mountRecent();
+	startRecentRefresher();
+	new MutationObserver(() => { mountView(); placeEntry(); mountRecent(); })
 		.observe(document.body, { childList: true, subtree: true });
 	document.addEventListener("keydown", (e) => {
 		if (e.ctrlKey && e.shiftKey && (e.key === "B" || e.key === "b")) {
