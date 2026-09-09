@@ -403,10 +403,21 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		return api("/sessions").then((s) => s.sessions || []).catch(() => sessions);
 	}
 	function recentList(all) {
-		return [...(all || [])]
+		const sorted = [...(all || [])]
 			.filter((s) => s && s.updatedAt)
-			.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-			.slice(0, RECENT_LIMIT);
+			.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+		// 按标题去重：同一标题（常为同一任务被多次开新会话）只保留最近活跃的一条，
+		// 避免「最新对话」出现重复标题。无标题的用 id 兜底不去重。
+		const seen = new Set();
+		const out = [];
+		for (const s of sorted) {
+			const key = (s.title && String(s.title).trim()) ? String(s.title).trim() : s.id;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			out.push(s);
+			if (out.length >= RECENT_LIMIT) break;
+		}
+		return out;
 	}
 	function currentSessionId() {
 		try {
