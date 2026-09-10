@@ -121,6 +121,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-recent-row .dot.run{background:#f2cc60;box-shadow:0 0 5px #f2cc60aa;animation:dsh-tb-blink 1.4s ease-in-out infinite}
 .dsh-recent-row .dot.idle{background:#3fb950;box-shadow:0 0 4px #3fb95066}
 .dsh-recent-row .title{flex:1;min-width:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,#e6edf3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-recent-row .sid{flex:none;font-size:9.5px;color:var(--dsw-alias-label-tertiary,#768390);letter-spacing:.2px}
 .dsh-recent-row .time{flex:none;font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4)}
 /* 当前打开的会话：去掉状态点，行用与原生「选中」一致的轻微底色（无边框、无缩放） */
 .dsh-recent-row.cur{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
@@ -400,18 +401,26 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	function recentData() {
 		return api("/sessions").then((s) => s.sessions || []).catch(() => sessions);
 	}
+	// 用于展示/判重的标题：有 title 用 title，否则退回 id。
+	function titleKeyOf(s) {
+		return (s.title && String(s.title).trim()) ? String(s.title).trim() : String(s.id);
+	}
+	// 会话短 id（去掉 session- 前缀取前 8 位），用于区分同名会话。
+	function shortSid(sid) {
+		return String(sid).replace(/^session-/, "").slice(0, 8);
+	}
 	function recentList(all) {
-		const sorted = [...(all || [])]
-			.filter((s) => s && s.updatedAt)
-			.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-		// 按标题去重：同一标题（常为同一任务被多次开新会话）只保留最近活跃的一条，
-		// 避免「最新对话」出现重复标题。无标题的用 id 兜底不去重。
+		// 只按【会话 id】去重（宿主本身已保证 id 唯一）。
+		// 绝不按标题去重：同一任务多次「＋ 新对话」的种子消息相同 → 派生标题相同，
+		// 按标题去重会把同一任务的多个关联对话合并成一条，导致「一个任务下只能看到
+		// 一个最最新的对话」。同名会话改由渲染层加短 id 后缀区分，不隐藏任何会话。
 		const seen = new Set();
 		const out = [];
-		for (const s of sorted) {
-			const key = (s.title && String(s.title).trim()) ? String(s.title).trim() : s.id;
-			if (seen.has(key)) continue;
-			seen.add(key);
+		for (const s of [...(all || [])]
+			.filter((x) => x && x.updatedAt)
+			.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) {
+			if (seen.has(s.id)) continue;
+			seen.add(s.id);
 			out.push(s);
 			if (out.length >= RECENT_LIMIT) break;
 		}
@@ -443,8 +452,16 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			return;
 		}
 		const curId = currentSessionId();
+		// 同名会话计数：同一任务多个「新对话」派生标题相同，给它们加短 id 后缀以便区分，
+		// 同时保证【不隐藏】任何一个会话。唯一标题不加后缀，保持与原生一致的干净观感。
+		const nameCount = new Map();
+		for (const s of list) {
+			const k = titleKeyOf(s);
+			nameCount.set(k, (nameCount.get(k) || 0) + 1);
+		}
 		recentBody.innerHTML = list.map((s) => {
-			const title = s.title && String(s.title).trim() ? s.title : s.id;
+			const base = titleKeyOf(s);
+			const dup = (nameCount.get(base) || 0) > 1;
 			const isCur = s.id === curId;
 			// 点号语义（与原生一致：仅一个 slot 状态点）：
 			//   运行中 → 黄（模型正在生成）
@@ -453,10 +470,12 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			let dot = "";
 			if (s.running) dot = `<span class="dot run"></span>`;
 			else if (s.updatedAt && s.updatedAt > readCursorOf(s.id)) dot = `<span class="dot idle"></span>`;
-			// 原生行是单行：[slot点][标题(单行 ellipsis)][时间]；无预览、无仓库胶囊。
-			return `<div class="dsh-recent-row${isCur ? " cur" : ""}" data-sid="${esc(s.id)}" title="打开并继续：${esc(title)}">
+			// 原生行单行：[slot点][标题(ellipsis)][同名时的短id][时间]；无预览、无仓库胶囊。
+			// 短 id 用独立 span（flex:none），保证标题被 ellipsis 截断时它依然可见可分辨。
+			return `<div class="dsh-recent-row${isCur ? " cur" : ""}" data-sid="${esc(s.id)}" title="打开并继续：${esc(base)}（${esc(s.id)}）">
 				<span class="slot">${dot}</span>
-				<span class="title">${esc(title)}</span>
+				<span class="title">${esc(base)}</span>
+				${dup ? `<span class="sid">${esc(shortSid(s.id))}</span>` : ""}
 				<span class="time">${fmtTime(s.updatedAt)}</span>
 			</div>`;
 		}).join("");
