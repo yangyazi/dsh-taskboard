@@ -265,6 +265,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-tb-sess{display:flex;justify-content:space-between;align-items:center;background:var(--dsw-alias-bg-base,#0d1117);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:8px;padding:6px 9px;margin-bottom:6px;gap:8px;transition:border-color .12s}
 .dsh-tb-sess:hover{border-color:var(--dsw-alias-border-l2,#3a434d)}
 .dsh-tb-sess .dsh-tb-sess-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px}
+.dsh-tb-sess .dsh-tb-sess-gone{color:var(--dsw-alias-label-tertiary,#768390);font-style:italic}
 .dsh-tb-sess button{flex:none;background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);color:var(--dsw-alias-label-primary,#e6edf3);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;transition:all .12s}
 .dsh-tb-sess button:hover{border-color:var(--dsw-alias-border-accent,#bc8cff)}
 .dsh-tb-sess button.dsh-tb-open{background:linear-gradient(135deg,#3478f6,#2a5fd8);border-color:transparent;color:#fff}
@@ -398,8 +399,22 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	let recentCollapsed = false;
 	let recentRefreshTimer = null;
 
+	// 会话 id 归一化：
+	// 宿主的 /sessions 索引里，冷会话（来自 projcache 的旧键）可能返回【不带
+	// session- 前缀的裸 uuid】，而任务 sessionIds / dsh.sessions.current / 原生
+	// open() 用的都是 `session-<uuid>`。格式不一致会导致：
+	//   ① 任务详情按 id 匹配不到 → 关联对话里显示原始 session-id（看不出在聊什么）；
+	//   ② 点「最新对话」里这类行会把裸 id 传给原生 open() → 打不开。
+	// 所以在【数据入口处】统一归一化，下游（匹配 / 去重 / 打开 / 已读游标）全部一致。
+	function normSid(sid) {
+		const s = String(sid ?? "");
+		return s && !s.startsWith("session-") ? `session-${s}` : s;
+	}
+	function normalizeSessions(list) {
+		return (list || []).map((s) => (s && s.id && normSid(s.id) !== s.id ? { ...s, id: normSid(s.id) } : s));
+	}
 	function recentData() {
-		return api("/sessions").then((s) => s.sessions || []).catch(() => sessions);
+		return api("/sessions").then((s) => normalizeSessions(s.sessions || [])).catch(() => sessions);
 	}
 	// 用于展示/判重的标题：有 title 用 title，否则退回 id。
 	function titleKeyOf(s) {
@@ -429,7 +444,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	function currentSessionId() {
 		try {
 			const v = JSON.parse(localStorage.getItem("dsh.sessions.current") || "null");
-			return v && v.sessionId ? v.sessionId : null;
+			return v && v.sessionId ? normSid(v.sessionId) : null;
 		} catch { return null; }
 	}
 	// 已读游标：记录每个会话「我看到哪了」。存 localStorage（key 前缀 dsh-tb-read）。
@@ -569,7 +584,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	async function refreshMeta() {
 		try {
 			const [s, w] = await Promise.all([api("/sessions"), api("/workspaces")]);
-			sessions = s.sessions || [];
+			sessions = normalizeSessions(s.sessions || []);
 			workspaces = w.workspaces || [];
 			const sel = $("#dsh-tb-repo-filter");
 			if (sel) {
@@ -760,6 +775,8 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		}
 	}
 	function openSession(sid) {
+		// 归一化：索引里的裸 uuid 要补上 session- 前缀，否则原生 open() 打不开。
+		sid = normSid(sid);
 		// 点开即视为已读：推进该会话的已读游标，使它的绿点(有新回复没看)消失。
 		markSessionRead(sid);
 		try {
@@ -1111,7 +1128,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				<div class="dsh-tb-actions"><button data-act="cancel">取消</button></div>
 			</div>`;
 			document.body.appendChild(pickMask);
-			const allSessions = fresh.sessions || sessions;
+			const allSessions = normalizeSessions(fresh.sessions || sessions);
 			const listEl = $("#tb-pick-list", pickMask);
 			const render = (q) => {
 				const ql = String(q || "").trim().toLowerCase();
@@ -1194,8 +1211,12 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			</div>
 			<div class="dsh-tb-field"><label>池内会话（共享上下文可访问者；点击打开可继续）</label>
 				<div id="tb-d-sessions">${(task.sessionIds || []).map((sid) => {
-					const s = sessions.find((x) => x.id === sid);
-					return `<div class="dsh-tb-sess"><span class="dsh-tb-sess-title" title="${esc(sid)}">${esc(s ? s.title : sid)}${s && s.running ? ` <span class="dsh-tb-run">● 运行中</span>` : ""}</span><button data-sid="${esc(sid)}" data-act="open" class="dsh-tb-open">打开</button><button data-sid="${esc(sid)}" data-act="unlink">解除</button></div>`;
+					const key = normSid(sid);
+					const s = sessions.find((x) => x.id === key);
+					// 匹配不到 = 宿主索引里没有这个会话（多为历史遗留的死链）：
+					// 明确标成「会话已不存在」，而不是把裸 session-id 当标题展示。
+					const label = s ? esc(s.title || key) : '<span class="dsh-tb-sess-gone">（会话已不存在）</span>';
+					return `<div class="dsh-tb-sess"><span class="dsh-tb-sess-title" title="${esc(key)}">${label}${s && s.running ? ` <span class="dsh-tb-run">● 运行中</span>` : ""}</span>${s ? `<button data-sid="${esc(key)}" data-act="open" class="dsh-tb-open">打开</button>` : ""}<button data-sid="${esc(sid)}" data-act="unlink">解除</button></div>`;
 				}).join("") || '<div class="dsh-tb-note">（未关联会话）</div>'}</div>
 				<div class="dsh-tb-row" style="margin-top:6px">
 					<button id="tb-d-sess-open" style="flex:1" title="按工作区分组、按更新时间排序、可搜索">🔍 选择会话关联</button>
