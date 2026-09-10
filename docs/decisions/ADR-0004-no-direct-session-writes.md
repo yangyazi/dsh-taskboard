@@ -81,13 +81,32 @@ agent；冷会话没有 agent，因此现在不做。
 
 ## 5. 数据修复
 
-`scripts/repair-session.mjs` 逐帧解码会话日志，精确剔除那条孤立的 splice 行
-（它是"认领"动作，被认领的消息本身仍以 `user/message` 留在历史里），其余行逐字保留、
+`scripts/repair-session.mjs` 逐帧解码会话日志，**保留**那条孤立的 splice 事件、只删掉
+它的 `data.removedCount`（该字段可选；Harness 自己在"删 0 条"时也不写它），
+于是它变成一次合法的空操作（`start=0`、不删不插），其余行逐字保留、
 按后端的 checksum 选项重新压缩，并自检：
 
 - 重放不再报错；
 - header 行完整；
-- 事件数正好 -1；
+- **事件行数不变**（关键，见下）；
 - 帧数、被认领消息仍在历史中。
+
+### 5.1 第一版修法是错的（教训）
+
+第一版做法是"删掉那条孤立事件行"，结果 Harness 换了一种报错：
+
+```
+failed to observe session "…": corrupt session log:
+seq gap in committed region at line 12165 (expected 339699, got 339700)
+```
+
+原因是 Harness 对 committed 区还有第二条校验——**第 N 个事件的 seq 必须等于 N**
+（`dsh-session-persistence-jsonl` 的 `SessionLogScanner.consumeEventLine`：
+`if (event.seq !== this.events.length)` → `seq gap in committed region`）。
+删事件会留下 seq 空洞，因此**只能改事件的内容，不能改事件的数量**：
+去掉 `removedCount` 让"越界删除"退化成"空操作"，两条校验同时满足。
+
+教训：修这类日志前要把校验规则读全（重放合法性 + seq 连续性），并优先选择
+"保留结构、只改语义"的最小改动。
 
 两个损坏会话均已修复（备份在 `/tmp/tb-session-repair-backup/`），修复后全量重放 0 失败。

@@ -8,8 +8,13 @@
 // 成因：任务面板插件曾用 sessionPersistence.append() 直接往会话日志塞 user/message，
 // 绕过了 Harness 的 inbox 记账（详见 ADR-0004）。
 //
-// 修法：只删掉那条孤立的 splice 行（它是一个"认领"动作，被认领的消息本身仍以
-// user/message 形式留在历史里，语义不变），其余行逐字保留、逐帧重建。
+// ⚠️ 修法要点（第一版修错了，别重犯）：
+//   Harness 对 committed 区还有一条校验——第 N 个事件的 seq 必须等于 N
+//   （SessionLogScanner.consumeEventLine: `if (event.seq !== this.events.length)`
+//    → "corrupt session log: seq gap in committed region"）。
+//   所以**不能删除**那条事件（会留下 seq 空洞，报另一种错），必须**保留事件并让它合法**：
+//   去掉 data.removedCount（该字段可选，Harness 在删 0 条时本身也不写它），
+//   事件即变成合法空操作（start=0、不删不插），两条校验同时满足。
 // 用法: node repair-session.mjs <sessionFile> [--apply]
 import { readFile, writeFile, mkdir, copyFile } from "node:fs/promises";
 import { constants, zstdCompressSync, zstdDecompressSync } from "node:zlib";
@@ -66,38 +71,33 @@ console.log(`${basename(dirname(file))} 事件数=${events.length} 首个非法 
 if (bad === null) { console.log("  无需修复"); process.exit(0); }
 
 // 找到承载该事件的那一行，逐字定位（同一 seq 只可能出现在这一条 splice 上）
-const needle = `"seq":${bad}`;
-let removedLines = 0;
-const newDecoded = decoded.map((text) => {
-	const lines = text.split("\n");
-	const kept = lines.filter((line) => {
-		if (line.includes(needle) && line.includes("agent/inbox/spliced")) {
-			console.log(`  剔除行: ${line.slice(0, 130)}`);
-			removedLines++;
-			return false;
-		}
-		return true;
-	});
-	return kept.join("\n");
-});
-if (removedLines !== 1) throw new Error(`预期剔除 1 行，实际 ${removedLines} 行 — 放弃`);
-console.log(`  剔除 ${removedLines} 行`);
+let patched = 0;
+const newDecoded = decoded.map((text) => text.split("\n").map((line) => {
+	if (!line.includes("agent/inbox/spliced") || !line.includes(`"seq":${bad}`)) return line;
+	const ev = JSON.parse(line);
+	if (ev.data?.removedCount === undefined) return line;
+	delete ev.data.removedCount;                 // ← 关键：保留事件行，只去掉越界的删除条数
+	patched++;
+	console.log(`  改写行: ${line.slice(0, 120)}`);
+	return JSON.stringify(ev);
+}).join("\n"));
+if (patched !== 1) throw new Error(`预期改写 1 行，实际 ${patched} 行 — 放弃`);
+console.log(`  改写 ${patched} 行（保留事件行以维持 seq 连续）`);
 
 // 重建（保持 checksum 选项与后端一致）
 const out = newDecoded.map((text) => zstdCompressSync(Buffer.from(text, "utf8"), { params: { [constants.ZSTD_c_checksumFlag]: 1 } }));
 
-// 自检：重新解码 + 重放
+// 自检：重新解码 + 重放 + 行数不变 + header 完整
 const reDecoded = out.map((f) => zstdDecompressSync(f).toString("utf8"));
-const reEvents = [];
-for (const text of reDecoded) for (const line of text.split("\n")) { if (!line.trim()) continue; try { reEvents.push(JSON.parse(line)); } catch { /* skip */ } }
-const stillBad = firstBadSplice(reEvents);
+const reLines = [];
+for (const text of reDecoded) for (const line of text.split("\n")) { if (!line.trim()) continue; reLines.push(line); }
+const origLines = [];
+for (const text of decoded) for (const line of text.split("\n")) { if (!line.trim()) continue; origLines.push(line); }
+const stillBad = firstBadSplice(reLines);
+const sameCount = reLines.length === origLines.length;
 const headerOk = reDecoded[0].startsWith('{"type":"session"');
-console.log(`  重建: 帧 ${frames.length} → ${out.length}, 事件 ${events.length} → ${reEvents.length}, header行完整=${headerOk}, 重放非法splice=${stillBad ?? "无"}`);
-// 关键内容抽查：被认领的那条消息仍在
-const claim = events.find((e) => e.type === "agent/inbox/spliced" && e.seq === bad);
-const following = events.filter((e) => e.type === "user/message" && e.seq > bad && e.seq < bad + 6).map((e) => (e.data?.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("").slice(0, 20));
-console.log(`  被认领消息(仍在历史中): ${JSON.stringify(following)}`);
-if (stillBad !== null || !headerOk || removedLines !== 1) throw new Error("自检未通过，放弃写入");
+console.log(`  重建: 帧 ${frames.length} → ${out.length}, 事件行 ${origLines.length} → ${reLines.length}（必须不变）, header行完整=${headerOk}, 重放非法splice=${stillBad ?? "无"}`);
+if (stillBad !== null || !sameCount || !headerOk) throw new Error("自检未通过，放弃写入");
 
 if (!apply) { console.log("  (dry-run，未写入；加 --apply 才落盘)"); process.exit(0); }
 const backupDir = "/tmp/tb-session-repair-backup";
