@@ -660,6 +660,8 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	// 必须手动拖拽才可用。因此这里改为从任意 React 托管节点向上到 root，
 	// 再广度遍历整棵树，收集 props 上的 open / startSession 回调。
 	let nativeCapabilitiesCache = null;
+	let nativeCapabilitiesAt = 0;
+	const NATIVE_CAPS_TTL = 5000;
 	function reactRootFibers() {
 		const roots = new Set();
 		const seeds = document.querySelectorAll('[class*="centerCol"], [class*="sidebarCol"], [class*="frame"], [class*="App"], body > div');
@@ -675,11 +677,16 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		return [...roots];
 	}
 	function discoverNativeCapabilities() {
-		if (nativeCapabilitiesCache && nativeCapabilitiesCache.open) return nativeCapabilitiesCache;
+		// 结果（含"没找到"）短期缓存：否则一次失败的探测会让后续每次调用都重跑
+		// 一遍整棵 fiber 树遍历 —— 这是「新建对话卡」的元凶之一。
+		const now = Date.now();
+		if (nativeCapabilitiesCache !== null && now - nativeCapabilitiesAt < NATIVE_CAPS_TTL) return nativeCapabilitiesCache;
 		const found = { open: null, startSession: null };
 		const queue = reactRootFibers();
 		let guard = 0;
+		const deadline = now + 40; // 单次探测最多 40ms，绝不拖住点击响应
 		while (queue.length > 0 && guard++ < 40000) {
+			if ((guard & 255) === 0 && Date.now() > deadline) break;
 			const f = queue.shift();
 			const mp = f.memoizedProps;
 			if (mp !== null && typeof mp === "object") {
@@ -697,6 +704,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			if (f.sibling) queue.push(f.sibling);
 		}
 		nativeCapabilitiesCache = found;
+		nativeCapabilitiesAt = Date.now();
 		return found;
 	}
 	function findNativeSessionOpen() {
@@ -710,32 +718,6 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			const parsed = JSON.parse(raw);
 			return typeof parsed?.sessionId === "string" ? parsed.sessionId : null;
 		} catch { return null; }
-	}
-	/** 轮询等待宿主把当前会话切到新会话，返回新会话 id。 */
-	function waitForNewSession(previousId, timeoutMs = 4000) {
-		const deadline = Date.now() + timeoutMs;
-		return new Promise((resolve) => {
-			const tick = () => {
-				const now = currentSessionId();
-				if (now !== null && now !== previousId) return resolve(now);
-				if (Date.now() > deadline) return resolve(null);
-				setTimeout(tick, 120);
-			};
-			tick();
-		});
-	}
-	/**
-	* 触发宿主原生「新建会话」（页面内创建，输入框天然可用）。
-	* 找不到原生回调时退化为点击侧边栏的新建按钮。
-	*/
-	function startNativeSession() {
-		const caps = discoverNativeCapabilities();
-		if (typeof caps.startSession === "function") {
-			try { caps.startSession(); return true; } catch { /* fall through */ }
-		}
-		const btn = document.querySelector('button[class*="newSession"]');
-		if (btn !== null) { btn.click(); return true; }
-		return false;
 	}
 	/**
 	* 新版 Harness reload 恢复会话后输入框会被锁，手动拖拽布局分隔条可恢复。
@@ -804,31 +786,31 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	}
 
 	/**
-	* 为任务新建对话：触发宿主原生「新建会话」（页面内创建，不走 reload），
-	* 轮询到新会话 id 后绑定到任务。原生路径不可用时回退到 host 冷会话 + reload。
+	* 为任务新建对话。
+	*
+	* 为什么不再走"原生新建会话"：本版 Harness 的侧边栏「New Session」是**草稿态**
+	* ——点了只切换到一个空输入框，会话 id 要等用户发出第一条消息才产生。
+	* 因此 `waitForNewSession()` 永远轮询不到 id，白等满超时（实测 4.5s）才回退，
+	* 这正是用户反馈的「新建关联对话很卡」。
+	*
+	* 现在直接走 host：建一个带任务共享上下文的**冷**会话（id 立刻返回、约 0.3s、
+	* 且 host 侧已自动绑定到任务）→ 立刻尝试页内打开 → 拿不到原生 open 才整页加载。
 	*/
 	async function newConversationForTask(taskId) {
-		const before = currentSessionId();
-		if (startNativeSession()) {
-			const newId = await waitForNewSession(before, 4500);
-			if (newId !== null) {
-				try {
-					await api(`/tasks/${taskId}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: newId, action: "link" }) });
-				} catch { /* 绑定失败不阻塞对话 */ }
-				await refreshAll();
-				toast("✓ 已新建对话并绑定到该任务");
-				return true;
-			}
-		}
-		// 回退：host 侧创建（含任务上下文种子）后整页打开
 		try {
 			const { sessionId } = await api(`/tasks/${taskId}/session`, { method: "POST", body: "{}" });
+			// 整页加载会丢掉 toast，用标记在加载后补提示。
+			setPendingToast("✓ 已新建对话并绑定到该任务");
 			openSession(sessionId);
 			return true;
 		} catch (err) {
 			alert(`新建对话失败：${err.message}`);
 			return false;
 		}
+	}
+	/** 跨整页加载的提示：写入标记，页面加载完成后由 boot 段补弹。 */
+	function setPendingToast(text) {
+		try { localStorage.setItem("dsh-taskboard.pending-toast", text); } catch { /* ignore */ }
 	}
 	// 轻量操作反馈提示
 	function toast(text) {
@@ -1416,6 +1398,14 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			localStorage.removeItem("dsh-taskboard.unstick");
 			setTimeout(() => { simulateHandleDrag(); }, 900);
 			setTimeout(() => { simulateHandleDrag(); }, 2000);
+		}
+	} catch { /* ignore */ }
+	// 整页加载会丢掉即时提示，这里补上「新建对话」的结果提示。
+	try {
+		const pending = localStorage.getItem("dsh-taskboard.pending-toast");
+		if (pending !== null) {
+			localStorage.removeItem("dsh-taskboard.pending-toast");
+			setTimeout(() => { toast(pending); }, 1200);
 		}
 	} catch { /* ignore */ }
 	const nudgeTimers = [400, 1000, 2000];
