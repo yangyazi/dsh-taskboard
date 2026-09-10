@@ -639,24 +639,125 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	// 也就不会先闪一下「新建对话」页再跳到目标会话。原生 open 会同步更新
 	// dsh.sessions.current 持久化，因此刷新后仍停留在该会话。
 	// 若拿不到原生 open（结构变了/未渲染），回退到 localStorage + load 的老方式。
-	function findNativeSessionOpen() {
-		// 从 DOM 里任一会话行向上找「会话列表」所有者组件的 fiber，取其 props.open。
-		// memoizedProps 里同时具备 open + startSession 的就是该所有者（与原生侧边栏一致）。
-		const candidates = document.querySelectorAll('[class*="sessionRow"], [class*="root"]');
-		for (const el of candidates) {
-			let fiberKey = null;
-			for (const k of Object.keys(el)) if (k.startsWith("__reactFiber$")) { fiberKey = k; break; }
-			if (fiberKey === null) continue;
-			let f = el[fiberKey];
-			for (let i = 0; i < 30 && f !== null; i++) {
-				const mp = f.memoizedProps;
-				if (mp !== null && typeof mp === "object" && typeof mp.open === "function" && typeof mp.startSession === "function") {
-					return mp.open;
-				}
-				f = f.return;
+	// 在 React fiber 树里发现宿主原生能力（不依赖会被哈希化的 CSS 类名）。
+	// 新版 Harness 的类名全部带哈希前缀，旧的 [class*="sessionRow"] 匹配不到，
+	// 会导致每次都回退整页 reload —— 而新版 reload 恢复会话后输入框是锁的，
+	// 必须手动拖拽才可用。因此这里改为从任意 React 托管节点向上到 root，
+	// 再广度遍历整棵树，收集 props 上的 open / startSession 回调。
+	let nativeCapabilitiesCache = null;
+	function reactRootFibers() {
+		const roots = new Set();
+		const seeds = document.querySelectorAll('[class*="centerCol"], [class*="sidebarCol"], [class*="frame"], [class*="App"], body > div');
+		for (const el of seeds) {
+			for (const k of Object.keys(el)) {
+				if (!k.startsWith("__reactFiber$") && !k.startsWith("__reactContainer$")) continue;
+				let f = el[k];
+				while (f && f.return) f = f.return;
+				if (f) roots.add(f);
 			}
+			if (roots.size > 0) break; // 一个 root 足够
 		}
-		return null;
+		return [...roots];
+	}
+	function discoverNativeCapabilities() {
+		if (nativeCapabilitiesCache && nativeCapabilitiesCache.open) return nativeCapabilitiesCache;
+		const found = { open: null, startSession: null };
+		const queue = reactRootFibers();
+		let guard = 0;
+		while (queue.length > 0 && guard++ < 40000) {
+			const f = queue.shift();
+			const mp = f.memoizedProps;
+			if (mp !== null && typeof mp === "object") {
+				if (found.open === null && typeof mp.open === "function") found.open = mp.open;
+				if (found.startSession === null && typeof mp.startSession === "function") found.startSession = mp.startSession;
+				// 有些层把 sessions 服务对象挂在 props 上
+				const svc = mp.sessions ?? mp.sessionService;
+				if (svc !== null && typeof svc === "object") {
+					if (found.open === null && typeof svc.open === "function") found.open = svc.open;
+					if (found.startSession === null && typeof svc.start === "function") found.startSession = svc.start;
+				}
+				if (found.open !== null && found.startSession !== null) break;
+			}
+			if (f.child) queue.push(f.child);
+			if (f.sibling) queue.push(f.sibling);
+		}
+		nativeCapabilitiesCache = found;
+		return found;
+	}
+	function findNativeSessionOpen() {
+		return discoverNativeCapabilities().open;
+	}
+	/** 读取宿主持久化的当前会话 id。 */
+	function currentSessionId() {
+		try {
+			const raw = localStorage.getItem("dsh.sessions.current");
+			if (raw === null) return null;
+			const parsed = JSON.parse(raw);
+			return typeof parsed?.sessionId === "string" ? parsed.sessionId : null;
+		} catch { return null; }
+	}
+	/** 轮询等待宿主把当前会话切到新会话，返回新会话 id。 */
+	function waitForNewSession(previousId, timeoutMs = 4000) {
+		const deadline = Date.now() + timeoutMs;
+		return new Promise((resolve) => {
+			const tick = () => {
+				const now = currentSessionId();
+				if (now !== null && now !== previousId) return resolve(now);
+				if (Date.now() > deadline) return resolve(null);
+				setTimeout(tick, 120);
+			};
+			tick();
+		});
+	}
+	/**
+	* 触发宿主原生「新建会话」（页面内创建，输入框天然可用）。
+	* 找不到原生回调时退化为点击侧边栏的新建按钮。
+	*/
+	function startNativeSession() {
+		const caps = discoverNativeCapabilities();
+		if (typeof caps.startSession === "function") {
+			try { caps.startSession(); return true; } catch { /* fall through */ }
+		}
+		const btn = document.querySelector('button[class*="newSession"]');
+		if (btn !== null) { btn.click(); return true; }
+		return false;
+	}
+	/**
+	* 新版 Harness reload 恢复会话后输入框会被锁，手动拖拽布局分隔条可恢复。
+	* 这里用合成指针事件复现那次拖拽：临时打桩 pointer capture 相关 API，
+	* 依次派发 pointerdown → pointermove(1px) → pointerup。
+	*/
+	function simulateHandleDrag() {
+		const handle = [...document.querySelectorAll('[class*="_handle"], [class*="handle"]')]
+			.find((el) => el.offsetParent !== null && getComputedStyle(el).cursor === "col-resize");
+		if (!handle) return false;
+		const rect = handle.getBoundingClientRect();
+		const x = Math.round(rect.left + rect.width / 2);
+		const y = Math.round(rect.top + Math.min(200, rect.height / 2));
+		const proto = Element.prototype;
+		const origSet = proto.setPointerCapture;
+		const origHas = proto.hasPointerCapture;
+		const origRelease = proto.releasePointerCapture;
+		try {
+			proto.setPointerCapture = function () {};
+			proto.hasPointerCapture = function () { return true; };
+			proto.releasePointerCapture = function () {};
+			const mk = (type, clientX) => new PointerEvent(type, {
+				bubbles: true, cancelable: true, composed: true,
+				pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 1,
+				clientX, clientY: y
+			});
+			handle.dispatchEvent(mk("pointerdown", x));
+			handle.dispatchEvent(mk("pointermove", x + 1));
+			handle.dispatchEvent(mk("pointerup", x + 1));
+			return true;
+		} catch {
+			return false;
+		} finally {
+			proto.setPointerCapture = origSet;
+			proto.hasPointerCapture = origHas;
+			proto.releasePointerCapture = origRelease;
+		}
 	}
 	function openSession(sid) {
 		// 点开即视为已读：推进该会话的已读游标，使它的绿点(有新回复没看)消失。
@@ -676,9 +777,41 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				return;
 			}
 		} catch { /* fall through to reload */ }
-		// 回退：持久化后整页加载
-		try { localStorage.setItem("dsh.sessions.current", JSON.stringify({ sessionId: sid })); } catch { /* ignore */ }
+		// 回退：持久化后整页加载。新版 Harness reload 恢复会话后输入框会被锁，
+		// 这里留下标记，页面加载后自动模拟一次布局分隔条拖拽把输入框解锁。
+		try {
+			localStorage.setItem("dsh.sessions.current", JSON.stringify({ sessionId: sid }));
+			localStorage.setItem("dsh-taskboard.unstick", String(Date.now()));
+		} catch { /* ignore */ }
 		location.reload();
+	}
+
+	/**
+	* 为任务新建对话：触发宿主原生「新建会话」（页面内创建，不走 reload），
+	* 轮询到新会话 id 后绑定到任务。原生路径不可用时回退到 host 冷会话 + reload。
+	*/
+	async function newConversationForTask(taskId) {
+		const before = currentSessionId();
+		if (startNativeSession()) {
+			const newId = await waitForNewSession(before, 4500);
+			if (newId !== null) {
+				try {
+					await api(`/tasks/${taskId}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: newId, action: "link" }) });
+				} catch { /* 绑定失败不阻塞对话 */ }
+				await refreshAll();
+				toast("✓ 已新建对话并绑定到该任务");
+				return true;
+			}
+		}
+		// 回退：host 侧创建（含任务上下文种子）后整页打开
+		try {
+			const { sessionId } = await api(`/tasks/${taskId}/session`, { method: "POST", body: "{}" });
+			openSession(sessionId);
+			return true;
+		} catch (err) {
+			alert(`新建对话失败：${err.message}`);
+			return false;
+		}
 	}
 	// 轻量操作反馈提示
 	function toast(text) {
@@ -952,10 +1085,8 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				</div>
 			</div>`;
 			$('[data-act="newsess"]', mask).addEventListener("click", async () => {
-				try {
-					const { sessionId } = await api(`/tasks/${task.id}/session`, { method: "POST", body: "{}" });
-					openSession(sessionId);
-				} catch (err) { alert(`新建会话失败：${err.message}`); }
+				mask.remove();
+				await newConversationForTask(task.id);
 			});
 			$('[data-act="bind"]', mask).addEventListener("click", () => { mask.remove(); openDetail(task.id); });
 			$('[data-act="detail"]', mask).addEventListener("click", () => { mask.remove(); openDetail(task.id); });
@@ -1172,10 +1303,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		}));
 		// ＋ 新对话：创建一个绑定到此任务的新会话并打开
 		$("#tb-d-sess-new", mask)?.addEventListener("click", async () => {
-			try {
-				const { sessionId } = await api(`/tasks/${id}/session`, { method: "POST", body: "{}" });
-				openSession(sessionId);
-			} catch (err) { alert(`新建会话失败：${err.message}`); }
+			await newConversationForTask(id);
 		});
 		// 状态行动按钮：AI 自动流转；用户只处理评审/确认
 		$$(".dsh-tb-statusbtn", mask).forEach((btn) => btn.addEventListener("click", async () => {
@@ -1260,6 +1388,15 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			}, 180);
 		} catch { /* ignore */ }
 	}
+	// reload 兜底路径的自动解锁：若本次加载来自「新建对话」的整页切换，
+	// 模拟一次布局分隔条拖拽（新版 Harness 需此动作才恢复输入框）。
+	try {
+		if (localStorage.getItem("dsh-taskboard.unstick") !== null) {
+			localStorage.removeItem("dsh-taskboard.unstick");
+			setTimeout(() => { simulateHandleDrag(); }, 900);
+			setTimeout(() => { simulateHandleDrag(); }, 2000);
+		}
+	} catch { /* ignore */ }
 	const nudgeTimers = [400, 1000, 2000];
 	const runNudges = () => { for (const t of nudgeTimers) setTimeout(forceRealReflow, t); };
 	if (document.readyState === "loading") window.addEventListener("load", runNudges);
