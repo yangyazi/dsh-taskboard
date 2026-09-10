@@ -112,21 +112,19 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-recent-refresh{background:transparent;border:0;color:var(--dsw-alias-label-secondary,#9aa7b4);cursor:pointer;font-size:12px;padding:0 2px;line-height:1;display:inline-flex}
 .dsh-recent-refresh:hover{color:var(--dsw-alias-label-primary,#e6edf3)}
 .dsh-recent-body{display:flex;flex-direction:column;gap:1px;padding:0 6px 6px;overflow:hidden}
-/* 单个会话行：对齐原生会话行高度/内边距，标题行 + 下方灰色预览行 */
-.dsh-recent-row{display:flex;flex-direction:column;gap:1px;padding:5px 8px;border-radius:8px;cursor:pointer;min-width:0;transition:background .12s}
+/* 单个会话行：对齐原生会话行 —— 单行 [状态点][标题(单行 ellipsis)][时间] */
+.dsh-recent-row{display:flex;align-items:center;gap:8px;height:32px;box-sizing:border-box;padding:5px 8px;border-radius:8px;cursor:pointer;min-width:0;transition:background .12s}
 .dsh-recent-row:hover{background:var(--dsw-alias-bg-layer-2,#1b2127)}
-.dsh-recent-row .lbl{display:flex;align-items:center;gap:6px;min-width:0;font-size:13px;color:var(--dsw-alias-label-primary,#e6edf3)}
-.dsh-recent-row .icn{flex:none;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);width:10px;text-align:center}
-.dsh-recent-row .dot{flex:none;width:8px;height:8px;border-radius:50%}
+/* 状态点（slot）：运行中黄(呼吸) / 有未读完成的回复绿(柔和光晕) / 已读或无新内容无点 */
+.dsh-recent-row .slot{flex:none;width:10px;display:flex;align-items:center;justify-content:center}
+.dsh-recent-row .dot{width:8px;height:8px;border-radius:50%}
 .dsh-recent-row .dot.run{background:#f2cc60;box-shadow:0 0 5px #f2cc60aa;animation:dsh-tb-blink 1.4s ease-in-out infinite}
 .dsh-recent-row .dot.idle{background:#3fb950;box-shadow:0 0 4px #3fb95066}
+.dsh-recent-row .title{flex:1;min-width:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,#e6edf3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-recent-row .time{flex:none;font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4)}
 /* 当前打开的会话：去掉状态点，行用与原生「选中」一致的轻微底色（无边框、无缩放） */
 .dsh-recent-row.cur{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
-.dsh-recent-row .t{flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dsh-recent-row .meta{display:flex;align-items:center;gap:6px;min-width:0;padding-left:16px}
-.dsh-recent-row .prev{flex:1;min-width:0;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dsh-recent-row .repo{flex:none;font-size:10px;color:#79c0ffb3;background:#79c0ff12;border-radius:6px;padding:0 6px;max-width:90px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dsh-recent-row .tm{flex:none;font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4)}
+.dsh-recent-row.cur .dot{display:none}
 .dsh-recent-empty{padding:6px 8px 8px;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);text-align:center}
 
 #dsh-tb-view ::-webkit-scrollbar, .dsh-tb-modal ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -445,33 +443,21 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			return;
 		}
 		const curId = currentSessionId();
-		const now = Date.now();
 		recentBody.innerHTML = list.map((s) => {
 			const title = s.title && String(s.title).trim() ? s.title : s.id;
 			const isCur = s.id === curId;
-			// 点号语义：
+			// 点号语义（与原生一致：仅一个 slot 状态点）：
 			//   运行中 → 黄（模型正在生成）
 			//   已完成(未运行) 且 updatedAt > 已读游标 → 绿（有一轮回复还没看）
 			//   已读 或 无新内容 → 无点
 			let dot = "";
-			let state = "";
-			if (s.running) {
-				dot = `<span class="dot run"></span>`;
-				state = "run";
-			} else if (s.updatedAt && s.updatedAt > readCursorOf(s.id)) {
-				dot = `<span class="dot idle"></span>`;
-				state = "idle";
-			}
+			if (s.running) dot = `<span class="dot run"></span>`;
+			else if (s.updatedAt && s.updatedAt > readCursorOf(s.id)) dot = `<span class="dot idle"></span>`;
+			// 原生行是单行：[slot点][标题(单行 ellipsis)][时间]；无预览、无仓库胶囊。
 			return `<div class="dsh-recent-row${isCur ? " cur" : ""}" data-sid="${esc(s.id)}" title="打开并继续：${esc(title)}">
-				<span class="lbl">
-					${dot}
-					<span class="t">${esc(title)}</span>
-				</span>
-				<span class="meta">
-					${s.preview ? `<span class="prev">${esc(s.preview)}</span>` : ""}
-					${s.repo ? `<span class="repo">${esc(repoShort(s.repo))}</span>` : ""}
-					<span class="tm">${fmtTime(s.updatedAt)}</span>
-				</span>
+				<span class="slot">${dot}</span>
+				<span class="title">${esc(title)}</span>
+				<span class="time">${fmtTime(s.updatedAt)}</span>
 			</div>`;
 		}).join("");
 		$$(".dsh-recent-row", recentBody).forEach((el) => el.addEventListener("click", () => {
@@ -1247,12 +1233,15 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		if (!col || col.clientWidth === 0) return;
 		const prev = col.style.width;
 		try {
-			col.style.width = `${col.clientWidth - 1}px`;
-			void col.offsetWidth; // 强制同步回流，确保 ResizeObserver 回调执行
-			col.style.width = prev || "";
+			col.style.width = `${col.clientWidth - 2}px`; // 真实改小 2px
+			setTimeout(() => {
+				// 保持 180ms 让 ResizeObserver 采样到变化后再还原
+				col.style.width = prev || "";
+				try { window.dispatchEvent(new Event("resize")); } catch { /* ignore */ }
+			}, 180);
 		} catch { /* ignore */ }
 	}
-	const nudgeTimers = [300, 800, 1600];
+	const nudgeTimers = [400, 1000, 2000];
 	const runNudges = () => { for (const t of nudgeTimers) setTimeout(forceRealReflow, t); };
 	if (document.readyState === "loading") window.addEventListener("load", runNudges);
 	else runNudges();
