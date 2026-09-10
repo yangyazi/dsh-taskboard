@@ -1,7 +1,9 @@
 // dsh-taskboard client: lightweight Jira-like task board.
 // - LEFT-SIDEBAR entry + full center-column view
 // - views: 概览 (workspace dashboard) / 看板 (kanban) / 列表 (list)
-// - labels, filters (repo/priority/status/label/search), session links
+// - task = shared context pool: new conversations get seeded context,
+//   linked conversations get it injected; detail shows live shared context
+// - labels, filters (repo/priority/status/label/search), session links + resume
 // Pure vanilla DOM. Talks to /taskboard/api/*.
 (() => {
 	if (window.__dshTaskboardLoaded) return;
@@ -35,6 +37,7 @@
 	const $ = (sel, root = document) => root.querySelector(sel);
 	const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 	const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+	const repoShort = (p) => { const parts = String(p || "").split("/").filter(Boolean); return parts.length ? parts[parts.length - 1] : String(p || ""); };
 	const labelColor = (label) => {
 		let h = 0;
 		for (const ch of String(label)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -71,8 +74,10 @@
 	// ---- styles ------------------------------------------------------------
 	const STYLE = `
 <style>
-[data-pane='conversation'],
-[class*='centerCol'] { position: relative; }
+/* 只在任务看板打开时才把对话列设为定位锚点；正常对话时不干预新版布局，
+   避免绝对定位浮层（含输入区相关）的包含块被改变导致输入被遮挡 */
+html[${ACTIVE_ATTR}] [data-pane='conversation'],
+html[${ACTIVE_ATTR}] [class*='centerCol'] { position: relative; }
 [${VIEW_ATTR}] {
   position: absolute; inset: 0; display: none; z-index: 60;
   background: var(--dsw-alias-bg-base, #0d1117); overflow: hidden;
@@ -89,7 +94,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
   display: flex; align-items: center; gap: 8px; width: 100%; height: 32px;
   padding: 0 12px; background: transparent; border: none; border-radius: 8px;
   color: var(--dsw-alias-label-secondary, #9aa7b4); cursor: pointer;
-  font-size: 13px; white-space: nowrap;
+  font-size: 13px; white-space: nowrap; transition: background .15s, color .15s;
 }
 [${ENTRY_ATTR}]:hover { background: var(--dsw-specific-sidebar-nav-item-hover, #1b2127); color: var(--dsw-alias-label-primary, #e6edf3); }
 [${ENTRY_ATTR}][data-active] { background: var(--dsw-specific-sidebar-nav-item-active, #232a31); color: var(--dsw-alias-label-primary, #e6edf3); font-weight: 600; }
@@ -97,86 +102,186 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 [${ENTRY_ATTR}][data-icon-only] { gap: 0; justify-content: center; padding: 0; height: 36px; margin-bottom: 12px; }
 [${ENTRY_ATTR}][data-icon-only] > span:not(:first-child) { display: none; }
 
+/* 侧边栏「最新对话」常驻小组件（钉在 New Session 下方、会话列表之上） */
+#dsh-recent { border-top: 1px solid var(--dsw-alias-border-l2,#2a3138); }
+.dsh-recent-head{display:flex;align-items:center;gap:6px;padding:5px 10px;font-size:11.5px;font-weight:700;color:var(--dsw-alias-label-secondary,#9aa7b4);cursor:pointer;letter-spacing:.2px;user-select:none}
+.dsh-recent-head .arrow{font-size:8px;transition:transform .15s;color:#768390}
+.dsh-recent.collapsed .dsh-recent-head .arrow{transform:rotate(-90deg)}
+.dsh-recent-head .title{flex:1}
+.dsh-recent-head .cnt{font-weight:600;font-size:10.5px;color:#79c0ff;background:#79c0ff14;border-radius:9px;padding:0 7px;flex:none}
+.dsh-recent-refresh{background:transparent;border:0;color:var(--dsw-alias-label-secondary,#9aa7b4);cursor:pointer;font-size:12px;padding:0 2px;line-height:1;display:inline-flex}
+.dsh-recent-refresh:hover{color:var(--dsw-alias-label-primary,#e6edf3)}
+.dsh-recent-body{display:flex;flex-direction:column;gap:1px;padding:0 6px 6px;overflow:hidden}
+/* 单个会话行：对齐原生会话行 —— 单行 [状态点][标题(单行 ellipsis)][时间] */
+.dsh-recent-row{display:flex;align-items:center;gap:8px;height:32px;box-sizing:border-box;padding:5px 8px;border-radius:8px;cursor:pointer;min-width:0;transition:background .12s}
+.dsh-recent-row:hover{background:var(--dsw-alias-bg-layer-2,#1b2127)}
+/* 状态点（slot）：运行中黄(呼吸) / 有未读完成的回复绿(柔和光晕) / 已读或无新内容无点 */
+.dsh-recent-row .slot{flex:none;width:10px;display:flex;align-items:center;justify-content:center}
+.dsh-recent-row .dot{width:8px;height:8px;border-radius:50%}
+.dsh-recent-row .dot.run{background:#f2cc60;box-shadow:0 0 5px #f2cc60aa;animation:dsh-tb-blink 1.4s ease-in-out infinite}
+.dsh-recent-row .dot.idle{background:#3fb950;box-shadow:0 0 4px #3fb95066}
+.dsh-recent-row .title{flex:1;min-width:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,#e6edf3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-recent-row .sid{flex:none;font-size:9.5px;color:var(--dsw-alias-label-tertiary,#768390);letter-spacing:.2px}
+.dsh-recent-row .time{flex:none;font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4)}
+/* 当前打开的会话：去掉状态点，行用与原生「选中」一致的轻微底色（无边框、无缩放） */
+.dsh-recent-row.cur{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
+.dsh-recent-row.cur .dot{display:none}
+.dsh-recent-empty{padding:6px 8px 8px;font-size:11px;color:var(--dsw-alias-label-tertiary,#768390);text-align:center}
+
+#dsh-tb-view ::-webkit-scrollbar, .dsh-tb-modal ::-webkit-scrollbar { width: 8px; height: 8px; }
+#dsh-tb-view ::-webkit-scrollbar-thumb, .dsh-tb-modal ::-webkit-scrollbar-thumb { background: #2c3440; border-radius: 4px; }
+#dsh-tb-view ::-webkit-scrollbar-thumb:hover, .dsh-tb-modal ::-webkit-scrollbar-thumb:hover { background: #3d4653; }
+#dsh-tb-view ::-webkit-scrollbar-track, .dsh-tb-modal ::-webkit-scrollbar-track { background: transparent; }
+
 #dsh-tb-view{height:100%;display:flex;flex-direction:column;color:var(--dsw-alias-label-primary,#e6edf3);font-size:12.5px}
-.dsh-tb-head{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--dsw-alias-border-l2,#2a3138);flex:none;gap:10px}
-.dsh-tb-title{font-size:15px;font-weight:600;flex:none}
-.dsh-tb-tabs{display:flex;gap:2px;flex:1;min-width:0}
-.dsh-tb-tab{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--dsw-alias-label-secondary,#9aa7b4);padding:4px 12px;font-size:13px;cursor:pointer}
+.dsh-tb-head{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-bottom:1px solid var(--dsw-alias-border-l2,#2a3138);flex:none;gap:10px;background:linear-gradient(180deg,rgba(52,120,246,.05),transparent)}
+.dsh-tb-title{font-size:15px;font-weight:700;flex:none;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+.dsh-tb-title::before{content:"";width:4px;height:16px;border-radius:2px;background:linear-gradient(180deg,#3478f6,#bc8cff)}
+.dsh-tb-tabs{display:flex;gap:4px;flex:1;min-width:0;background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:9px;padding:2px;width:fit-content}
+.dsh-tb-tab{background:transparent;border:0;color:var(--dsw-alias-label-secondary,#9aa7b4);padding:5px 14px;font-size:12.5px;cursor:pointer;border-radius:7px;transition:all .15s}
 .dsh-tb-tab:hover{color:var(--dsw-alias-label-primary,#e6edf3)}
-.dsh-tb-tab.dsh-tb-tab-on{border-bottom-color:#3478f6;color:var(--dsw-alias-label-primary,#e6edf3);font-weight:600}
+.dsh-tb-tab.dsh-tb-tab-on{background:var(--dsw-alias-button-primary-bg,#3478f6);color:#fff;font-weight:600;box-shadow:0 1px 4px rgba(52,120,246,.4)}
 .dsh-tb-head-actions{display:flex;gap:6px;flex:none}
-.dsh-tb-head-actions button,.dsh-tb-toolbar select,.dsh-tb-toolbar input{background:var(--dsw-alias-bg-layer-2,#1b2127);color:var(--dsw-alias-label-primary,#e6edf3);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer}
-.dsh-tb-head-actions #dsh-tb-new{background:var(--dsw-alias-button-primary-bg,#3478f6);border-color:transparent}
-.dsh-tb-toolbar{display:flex;gap:8px;align-items:center;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l3,#232a31);flex:none;flex-wrap:wrap}
+.dsh-tb-head-actions button,.dsh-tb-toolbar select,.dsh-tb-toolbar input{background:var(--dsw-alias-bg-layer-2,#1b2127);color:var(--dsw-alias-label-primary,#e6edf3);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:7px;padding:5px 10px;font-size:12px;cursor:pointer;transition:border-color .15s,background .15s}
+.dsh-tb-head-actions button:hover{border-color:var(--dsw-alias-border-accent,#bc8cff)}
+.dsh-tb-head-actions #dsh-tb-refresh{font-size:13px}
+.dsh-tb-toolbar{display:flex;gap:8px;align-items:center;padding:9px 18px;border-bottom:1px solid var(--dsw-alias-border-l3,#232a31);flex:none;flex-wrap:wrap;background:var(--dsw-alias-bg-layer-2,#1b2127)}
 .dsh-tb-toolbar #dsh-tb-search{flex:1;min-width:140px}
+.dsh-tb-toolbar #dsh-tb-search:focus{outline:none;border-color:#3478f6}
+.dsh-tb-newbtn{background:linear-gradient(135deg,#3478f6,#2a5fd8);border-color:transparent;font-weight:600;flex:none;margin-left:auto}
+.dsh-tb-newbtn:hover{filter:brightness(1.1);border-color:transparent}
 .dsh-tb-count{color:var(--dsw-alias-label-secondary,#9aa7b4);font-size:11.5px}
 .dsh-tb-body{flex:1;min-height:0;overflow:auto}
-.dsh-tb-columns{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:10px 14px;height:100%;box-sizing:border-box}
-.dsh-tb-col{background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:8px;display:flex;flex-direction:column;min-height:100%;min-width:150px}
-.dsh-tb-col-head{padding:7px 9px;font-weight:600;font-size:12px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--dsw-alias-border-l3,#232a31);color:var(--dsw-alias-label-secondary,#9aa7b4)}
-.dsh-tb-col-head b{color:var(--dsw-alias-label-primary,#e6edf3)}
-.dsh-tb-col-body{padding:6px;display:flex;flex-direction:column;gap:6px;overflow-y:auto}
-.dsh-tb-card{background:var(--dsw-alias-bg-base,#0d1117);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:7px;padding:8px 9px;cursor:pointer;transition:border-color .12s}
-.dsh-tb-card:hover{border-color:var(--dsw-alias-border-accent,#bc8cff)}
-.dsh-tb-card-title{font-size:12.5px;font-weight:500;line-height:1.35;word-break:break-all}
-.dsh-tb-card-meta{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;align-items:center}
-.dsh-tb-pill{font-size:10.5px;padding:1px 6px;border-radius:9px;border:1px solid currentColor;line-height:1.5}
-.dsh-tb-bar{height:3px;border-radius:2px;background:var(--dsw-alias-bg-layer-2,#1b2127);margin-top:7px;overflow:hidden}
-.dsh-tb-bar>i{display:block;height:100%;background:var(--dsw-alias-button-primary-bg,#3478f6)}
-.dsh-tb-card-foot{display:flex;justify-content:space-between;margin-top:6px;color:var(--dsw-alias-label-secondary,#9aa7b4);font-size:10.5px}
+.dsh-tb-columns{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;padding:12px 16px;height:100%;box-sizing:border-box}
+.dsh-tb-col{background:linear-gradient(180deg,var(--dsw-alias-bg-layer-2,#1b2127),var(--dsw-alias-bg-layer-1,#14181d));border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:11px;display:flex;flex-direction:column;min-height:100%;min-width:150px}
+.dsh-tb-col-head{padding:9px 11px;font-weight:600;font-size:12px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--dsw-alias-border-l3,#232a31);color:var(--dsw-alias-label-secondary,#9aa7b4)}
+.dsh-tb-col-head b{color:var(--dsw-alias-label-primary,#e6edf3);background:var(--dsw-alias-bg-base,#0d1117);border-radius:8px;padding:1px 7px;font-size:11px}
+.dsh-tb-col-body{padding:7px;display:flex;flex-direction:column;gap:7px;overflow-y:auto}
+.dsh-tb-card{background:var(--dsw-alias-bg-base,#0d1117);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:10px;padding:10px 11px;cursor:pointer;transition:border-color .15s,transform .15s,box-shadow .15s}
+.dsh-tb-card:hover{border-color:var(--dsw-alias-border-accent,#bc8cff);transform:translateY(-1px);box-shadow:0 3px 10px rgba(0,0,0,.35)}
+.dsh-tb-card-title{font-size:12.5px;font-weight:600;line-height:1.4;word-break:break-all}
+.dsh-tb-card-meta{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px;align-items:center}
+.dsh-tb-pill{font-size:10.5px;padding:1px 7px;border-radius:9px;border:1px solid;line-height:1.6;background:color-mix(in srgb,currentColor 10%,transparent)}
+.dsh-tb-bar{height:4px;border-radius:3px;background:var(--dsw-alias-bg-layer-2,#1b2127);margin-top:8px;overflow:hidden}
+.dsh-tb-bar>i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,#3478f6,#7c5cf0)}
+.dsh-tb-card-foot{display:flex;justify-content:space-between;margin-top:7px;color:var(--dsw-alias-label-secondary,#9aa7b4);font-size:10.5px}
 .dsh-tb-empty{color:var(--dsw-alias-label-secondary,#9aa7b4);text-align:center;padding:14px 4px;font-size:11.5px}
-/* list view */
 .dsh-tb-table{width:100%;border-collapse:collapse;font-size:12px}
-.dsh-tb-table th{position:sticky;top:0;background:var(--dsw-alias-bg-layer-2,#1b2127);color:var(--dsw-alias-label-secondary,#9aa7b4);text-align:left;padding:7px 10px;border-bottom:1px solid var(--dsw-alias-border-l2,#2a3138);font-weight:600;white-space:nowrap;z-index:1}
-.dsh-tb-table td{padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l3,#232a31);vertical-align:middle}
-.dsh-tb-table tr{cursor:pointer}
-.dsh-tb-table tr:hover td{background:var(--dsw-alias-bg-layer-2,#1b2127)}
-/* overview */
-.dsh-tb-ov{padding:14px 16px;height:100%;box-sizing:border-box;overflow:auto}
-.dsh-tb-ov-stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
-.dsh-tb-ov-stat{flex:1;min-width:110px;background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:8px;padding:10px 12px}
-.dsh-tb-ov-stat .n{font-size:22px;font-weight:700;line-height:1.1}
-.dsh-tb-ov-stat .l{font-size:11px;color:var(--dsw-alias-label-secondary,#9aa7b4);margin-top:2px}
-.dsh-tb-ov-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px;margin-bottom:16px}
-.dsh-tb-ov-ws{background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:8px;padding:10px 12px;cursor:pointer;transition:border-color .12s}
-.dsh-tb-ov-ws:hover{border-color:var(--dsw-alias-border-accent,#bc8cff)}
-.dsh-tb-ov-ws h4{margin:0 0 2px;font-size:13.5px}
-.dsh-tb-ov-ws .path{font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4);word-break:break-all;margin-bottom:7px}
-.dsh-tb-ov-ws .meta{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
-.dsh-tb-ov-ws .branch{font-size:10.5px;color:#79c0ff;border:1px solid #79c0ff66;border-radius:8px;padding:1px 6px}
+.dsh-tb-table th{position:sticky;top:0;background:var(--dsw-alias-bg-layer-2,#1b2127);color:var(--dsw-alias-label-secondary,#9aa7b4);text-align:left;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l2,#2a3138);font-weight:600;white-space:nowrap;z-index:1}
+.dsh-tb-table td{padding:7px 12px;border-bottom:1px solid var(--dsw-alias-border-l3,#232a31);vertical-align:middle}
+.dsh-tb-table tr{cursor:pointer;transition:background .12s}
+.dsh-tb-table tr:hover td{background:rgba(52,120,246,.07)}
+.dsh-tb-ov{padding:16px 18px;height:100%;box-sizing:border-box;overflow:auto}
+.dsh-tb-ov-stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.dsh-tb-ov-stat{flex:1;min-width:100px;background:linear-gradient(180deg,var(--dsw-alias-bg-layer-2,#1b2127),var(--dsw-alias-bg-layer-1,#14181d));border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:11px;padding:11px 13px;position:relative;overflow:hidden;transition:border-color .15s}
+.dsh-tb-ov-stat:hover{border-color:var(--dsw-alias-border-l2,#3a434d)}
+.dsh-tb-ov-stat::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,currentColor,transparent);opacity:.35}
+.dsh-tb-ov-stat .n{font-size:25px;font-weight:700;line-height:1.1}
+.dsh-tb-ov-stat .l{font-size:11px;color:var(--dsw-alias-label-secondary,#9aa7b4);margin-top:3px}
+.dsh-tb-ov-stat .mini{height:5px;border-radius:3px;background:var(--dsw-alias-bg-base,#0d1117);margin-top:9px;overflow:hidden}
+.dsh-tb-ov-stat .mini i{display:block;height:100%;border-radius:3px}
+.dsh-tb-ov-add{border:1.5px dashed #3d4653;display:flex;align-items:center;justify-content:center;cursor:pointer;min-width:118px;transition:border-color .15s,background .15s}
+.dsh-tb-ov-add:hover{border-color:#3478f6;background:rgba(52,120,246,.06)}
+.dsh-tb-ov-add::before{display:none}
+.dsh-tb-ov-addbtn{font-size:13px;font-weight:600;color:#9aa7b4;display:flex;align-items:center;gap:6px;transition:color .15s;white-space:nowrap}
+.dsh-tb-ov-add:hover .dsh-tb-ov-addbtn{color:#e6edf3}
+.dsh-tb-ov-stat-click{cursor:pointer}
+.dsh-tb-ov-stat-click:hover{border-color:var(--dsw-alias-border-accent,#bc8cff);transform:translateY(-1px);box-shadow:0 3px 10px rgba(0,0,0,.3)}
+.dsh-tb-ov-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:11px;margin-bottom:16px}
+.dsh-tb-ov-ws{background:linear-gradient(180deg,var(--dsw-alias-bg-layer-2,#1b2127),var(--dsw-alias-bg-layer-1,#14181d));border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:12px;padding:12px 14px;cursor:pointer;transition:border-color .15s,transform .15s,box-shadow .15s}
+.dsh-tb-ov-ws:hover{border-color:var(--dsw-alias-border-accent,#bc8cff);transform:translateY(-1px);box-shadow:0 4px 14px rgba(0,0,0,.35)}
+.dsh-tb-ov-ws .ws-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.dsh-tb-ov-ws h4{margin:0;font-size:13.5px;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-tb-ov-ws .ws-total{flex:none;font-size:11px;color:var(--dsw-alias-label-secondary,#9aa7b4);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:9px;padding:1px 8px;background:var(--dsw-alias-bg-base,#0d1117)}
+.dsh-tb-ov-ws .path{font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4);word-break:break-all;margin:4px 0 9px}
+.dsh-tb-ov-ws .stack{display:flex;height:8px;border-radius:5px;overflow:hidden;background:var(--dsw-alias-bg-base,#0d1117);margin-bottom:8px;gap:1px}
+.dsh-tb-ov-ws .stack i{display:block;height:100%}
+.dsh-tb-ov-ws .ws-stats{display:flex;flex-wrap:wrap;gap:9px;font-size:11px;margin-bottom:9px}
+.dsh-tb-ov-ws .ws-stats .st{display:inline-flex;align-items:center;gap:5px;color:var(--dsw-alias-label-secondary,#9aa7b4)}
+.dsh-tb-ov-ws .ws-stats .st b{color:var(--dsw-alias-label-primary,#e6edf3);font-weight:700}
+.dsh-tb-ov-ws .ws-stats .dot{width:8px;height:8px;border-radius:50%;display:inline-block;box-shadow:0 0 4px currentColor}
+.dsh-tb-ov-ws .comp{display:flex;align-items:center;gap:8px;margin-bottom:2px}
+.dsh-tb-ov-ws .comp .track{flex:1;height:6px;border-radius:3px;background:var(--dsw-alias-bg-base,#0d1117);overflow:hidden}
+.dsh-tb-ov-ws .comp .track i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,#2ea043,#56d364)}
+.dsh-tb-ov-ws .comp .pct{font-size:11px;color:var(--dsw-alias-label-secondary,#9aa7b4);flex:none;font-weight:600}
+.dsh-tb-ov-ws .meta{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:6px}
+.dsh-tb-ov-ws .branch{font-size:10.5px;color:#79c0ff;border:1px solid #79c0ff4d;border-radius:8px;padding:1px 7px;background:#79c0ff12}
 .dsh-tb-ov-ws .dirty{color:#f85149}
 .dsh-tb-ov-ws .sess{font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4);margin-left:auto}
-.dsh-tb-ov-ws .sesslist{margin-top:7px;border-top:1px dashed var(--dsw-alias-border-l3,#232a31);padding-top:5px;display:flex;flex-direction:column;gap:2px}
-.dsh-tb-ov-ws .sesslist .s{font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;color:#79c0ff}
-.dsh-tb-ov-ws .sesslist .s:hover{text-decoration:underline}
-.dsh-tb-ov-sec{font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary,#9aa7b4);margin:14px 0 8px}
-.dsh-tb-ov-recent{display:flex;flex-direction:column;gap:5px}
-.dsh-tb-ov-item{display:flex;align-items:center;gap:8px;background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:6px;padding:6px 10px;cursor:pointer}
-.dsh-tb-ov-item:hover{border-color:var(--dsw-alias-border-accent,#bc8cff)}
+.dsh-tb-ov-ws .sesslist{margin-top:8px;border-top:1px dashed var(--dsw-alias-border-l3,#232a31);padding-top:6px;display:flex;flex-direction:column;gap:3px}
+.dsh-tb-ov-ws .sesslist .s{font-size:10.5px;color:#79c0ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;padding:1px 4px;border-radius:5px;transition:background .12s}
+.dsh-tb-ov-ws .sesslist .s:hover{background:#79c0ff12;text-decoration:underline}
+.dsh-tb-ov-sec{font-size:12px;font-weight:700;color:var(--dsw-alias-label-secondary,#9aa7b4);margin:16px 0 9px;letter-spacing:.3px}
+.dsh-tb-ov-recent{display:flex;flex-direction:column;gap:6px}
+.dsh-tb-ov-item{display:flex;align-items:center;gap:9px;background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:9px;padding:7px 11px;cursor:pointer;transition:border-color .15s,transform .12s}
+.dsh-tb-ov-item:hover{border-color:var(--dsw-alias-border-accent,#bc8cff);transform:translateX(2px)}
 .dsh-tb-ov-item .dot{width:8px;height:8px;border-radius:50%;flex:none}
-.dsh-tb-ov-item .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-tb-ov-item .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
 .dsh-tb-ov-item .r{font-size:10.5px;color:#79c0ff;flex:none}
 .dsh-tb-ov-item .tm{font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4);flex:none}
-.dsh-tb-modal-mask{position:fixed;inset:0;z-index:9995;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center}
-.dsh-tb-modal{width:min(640px,92vw);max-height:88vh;overflow:auto;background:var(--dsw-alias-bg-layer-1,#14181d);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:10px;padding:16px 18px;color:var(--dsw-alias-label-primary,#e6edf3)}
-.dsh-tb-modal h3{margin:0 0 12px;font-size:15px}
-.dsh-tb-field{margin-bottom:10px}
-.dsh-tb-field label{display:block;font-size:11.5px;color:var(--dsw-alias-label-secondary,#9aa7b4);margin-bottom:4px}
-.dsh-tb-field input,.dsh-tb-field select,.dsh-tb-field textarea{width:100%;box-sizing:border-box;background:var(--dsw-alias-bg-base,#0d1117);color:var(--dsw-alias-label-primary,#e6edf3);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:6px;padding:6px 9px;font-size:12.5px;font-family:inherit}
+.dsh-tb-modal-mask{position:fixed;inset:0;z-index:9995;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.dsh-tb-modal{width:min(640px,92vw);max-height:88vh;overflow:auto;background:var(--dsw-alias-bg-layer-1,#14181d);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:14px;padding:18px 20px;color:var(--dsw-alias-label-primary,#e6edf3);box-shadow:0 16px 50px rgba(0,0,0,.55);animation:dsh-tb-pop .18s ease}
+@keyframes dsh-tb-pop{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
+.dsh-tb-modal h3{margin:0 0 14px;font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:8px}
+.dsh-tb-modal h3::before{content:"";width:4px;height:17px;border-radius:2px;background:linear-gradient(180deg,#3478f6,#bc8cff)}
+.dsh-tb-field{margin-bottom:11px}
+.dsh-tb-field label{display:block;font-size:11.5px;color:var(--dsw-alias-label-secondary,#9aa7b4);margin-bottom:5px;font-weight:600}
+.dsh-tb-field input,.dsh-tb-field select,.dsh-tb-field textarea{width:100%;box-sizing:border-box;background:var(--dsw-alias-bg-base,#0d1117);color:var(--dsw-alias-label-primary,#e6edf3);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:8px;padding:7px 10px;font-size:12.5px;font-family:inherit;transition:border-color .15s}
+.dsh-tb-field input:focus,.dsh-tb-field select:focus,.dsh-tb-field textarea:focus{outline:none;border-color:#3478f6}
 .dsh-tb-field textarea{min-height:70px;resize:vertical}
+.dsh-tb-field input.err,.dsh-tb-field select.err,.dsh-tb-field textarea.err{border-color:#f85149}
+.dsh-tb-hint{color:#f85149;font-size:11px;margin-top:4px}
+.dsh-tb-created-title{font-size:14.5px;font-weight:700;margin:2px 0}
+.dsh-tb-created-meta{font-size:11.5px;color:#79c0ff;margin-bottom:14px;word-break:break-all}
+.dsh-tb-created-next{font-size:12px;color:var(--dsw-alias-label-secondary,#9aa7b4);margin-bottom:9px;font-weight:600}
+.dsh-tb-created-actions{display:flex;flex-direction:column;gap:8px}
+.dsh-tb-big{padding:11px 16px !important;font-size:13.5px !important;text-align:center}
+.dsh-tb-created-actions .dsh-tb-big{width:100%}
+.dsh-tb-ctx{border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:8px;background:var(--dsw-alias-bg-base,#0d1117);overflow:hidden}
+.dsh-tb-ctx-body{max-height:180px;overflow:auto;padding:8px 10px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#9aa7b4);white-space:pre-wrap;word-break:break-all}
+.dsh-tb-ctx-actions{display:flex;gap:6px;padding:5px 8px;border-top:1px solid var(--dsw-alias-border-l3,#232a31)}
+.dsh-tb-ctx-actions button{background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);color:var(--dsw-alias-label-primary,#e6edf3);border-radius:6px;padding:3px 10px;font-size:11px;cursor:pointer}
+.dsh-tb-ctx-actions button:hover{border-color:#3478f6}
 .dsh-tb-row{display:flex;gap:10px}
 .dsh-tb-row .dsh-tb-field{flex:1}
-.dsh-tb-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
-.dsh-tb-actions button{padding:6px 14px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2,#2a3138);background:var(--dsw-alias-bg-layer-2,#1b2127);color:var(--dsw-alias-label-primary,#e6edf3);cursor:pointer;font-size:12.5px}
-.dsh-tb-actions button.dsh-tb-primary{background:var(--dsw-alias-button-primary-bg,#3478f6);border-color:transparent;color:#fff}
+.dsh-tb-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.dsh-tb-actions button{padding:7px 16px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#2a3138);background:var(--dsw-alias-bg-layer-2,#1b2127);color:var(--dsw-alias-label-primary,#e6edf3);cursor:pointer;font-size:12.5px;transition:all .15s}
+.dsh-tb-actions button:hover{border-color:var(--dsw-alias-border-accent,#bc8cff)}
+.dsh-tb-actions button.dsh-tb-primary{background:linear-gradient(135deg,#3478f6,#2a5fd8);border-color:transparent;color:#fff;font-weight:600}
+.dsh-tb-actions button.dsh-tb-primary:hover{filter:brightness(1.1)}
 .dsh-tb-actions button.dsh-tb-danger{color:#f85149}
+.dsh-tb-actions button.dsh-tb-danger:hover{background:#f8514914}
 .dsh-tb-actions button.dsh-tb-grow{flex:1}
-.dsh-tb-note{border-left:2px solid var(--dsw-alias-border-l2,#2a3138);padding:2px 0 2px 10px;margin:8px 0;color:var(--dsw-alias-label-secondary,#9aa7b4);font-size:12px;white-space:pre-wrap;word-break:break-all}
-.dsh-tb-note .dsh-tb-note-time{font-size:10.5px}
-.dsh-tb-sess{display:flex;justify-content:space-between;align-items:center;background:var(--dsw-alias-bg-base,#0d1117);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:6px;padding:5px 8px;margin-bottom:5px;gap:8px}
+.dsh-tb-statusline{display:flex;flex-direction:column;gap:7px}
+.dsh-tb-statusbadge{display:inline-flex;align-items:center;font-size:12px;font-weight:700;border:1px solid;border-radius:8px;padding:3px 11px;width:fit-content}
+.dsh-tb-statusactions{display:flex;gap:6px;flex-wrap:wrap}
+.dsh-tb-statusbtn{background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);color:var(--dsw-alias-label-primary,#e6edf3);border-radius:7px;padding:4px 11px;font-size:11.5px;cursor:pointer;transition:all .13s}
+.dsh-tb-statusbtn:hover{border-color:#3478f6;color:#fff}
+.dsh-tb-statusbtn.primary{background:linear-gradient(135deg,#3478f6,#2a5fd8);border-color:transparent;color:#fff;font-weight:600}
+.dsh-tb-statusbtn.primary:hover{filter:brightness(1.1)}
+.dsh-tb-statusbtn.ghost{opacity:.7}
+.dsh-tb-note{border-left:2px solid var(--dsw-alias-border-l2,#2a3138);padding:2px 0 2px 11px;margin:9px 0;color:var(--dsw-alias-label-secondary,#9aa7b4);font-size:12px;white-space:pre-wrap;word-break:break-all;border-image:linear-gradient(180deg,#3478f6,#bc8cff) 1}
+.dsh-tb-note .dsh-tb-note-time{font-size:10.5px;font-weight:600;color:#79c0ff}
+.dsh-tb-sess{display:flex;justify-content:space-between;align-items:center;background:var(--dsw-alias-bg-base,#0d1117);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:8px;padding:6px 9px;margin-bottom:6px;gap:8px;transition:border-color .12s}
+.dsh-tb-sess:hover{border-color:var(--dsw-alias-border-l2,#3a434d)}
 .dsh-tb-sess .dsh-tb-sess-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px}
-.dsh-tb-sess button{flex:none;background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);color:var(--dsw-alias-label-primary,#e6edf3);border-radius:5px;padding:2px 8px;font-size:11px;cursor:pointer}
-.dsh-tb-sess button.dsh-tb-open{background:var(--dsw-alias-button-primary-bg,#3478f6);border-color:transparent}
+.dsh-tb-sess button{flex:none;background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);color:var(--dsw-alias-label-primary,#e6edf3);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;transition:all .12s}
+.dsh-tb-sess button:hover{border-color:var(--dsw-alias-border-accent,#bc8cff)}
+.dsh-tb-sess button.dsh-tb-open{background:linear-gradient(135deg,#3478f6,#2a5fd8);border-color:transparent;color:#fff}
+.dsh-tb-sess button.dsh-tb-open:hover{filter:brightness(1.1)}
+.dsh-tb-run{color:#f2cc60;font-size:10px;border:1px solid #f2cc6066;border-radius:8px;padding:0 6px;margin-left:6px;flex:none;animation:dsh-tb-blink 1.2s ease-in-out infinite}
+@keyframes dsh-tb-blink{0%,100%{opacity:1}50%{opacity:.45}}
+.dsh-tb-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:9999;background:#1b2127;border:1px solid #3478f6;color:#e6edf3;border-radius:9px;padding:9px 20px;font-size:12.5px;font-weight:600;box-shadow:0 6px 24px rgba(0,0,0,.5);animation:dsh-tb-toast .18s ease;pointer-events:none}
+@keyframes dsh-tb-toast{from{opacity:0;transform:translateX(-50%) translateY(8px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+.dsh-tb-picklist{display:flex;flex-direction:column;gap:10px;max-height:48vh;overflow-y:auto;margin-top:10px}
+.dsh-tb-pick-group{border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:9px;overflow:hidden}
+.dsh-tb-pick-grouphead{display:flex;justify-content:space-between;align-items:center;background:var(--dsw-alias-bg-layer-2,#1b2127);padding:6px 11px;font-size:11.5px;font-weight:700;color:var(--dsw-alias-label-secondary,#9aa7b4);letter-spacing:.3px}
+.dsh-tb-pick-grouphead b{color:#bc8cff}
+.dsh-tb-pick-item{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 11px;border-top:1px solid var(--dsw-alias-border-l2,#2a3138);cursor:pointer;transition:background .12s}
+.dsh-tb-pick-item:hover{background:var(--dsw-alias-bg-layer-2,#1b2127)}
+.dsh-tb-pick-item .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.dsh-tb-pick-item .m{flex:none;font-size:10.5px;color:var(--dsw-alias-label-tertiary,#768390)}
+.dsh-tb-empty{padding:14px;text-align:center;color:var(--dsw-alias-label-tertiary,#768390);font-size:12px}
 </style>`;
 
 	document.documentElement.insertAdjacentHTML("beforeend", STYLE);
@@ -193,7 +298,6 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
     </div>
     <div class="dsh-tb-head-actions">
       <button id="dsh-tb-refresh" title="刷新">⟳</button>
-      <button id="dsh-tb-new" title="新建任务">＋ 新建</button>
     </div>
   </div>
   <div class="dsh-tb-toolbar" id="dsh-tb-toolbar">
@@ -203,6 +307,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
     <select id="dsh-tb-status-filter"><option value="">全部状态</option></select>
     <select id="dsh-tb-label-filter"><option value="">全部标签</option></select>
     <span id="dsh-tb-count" class="dsh-tb-count"></span>
+    <button id="dsh-tb-new" title="新建任务" class="dsh-tb-newbtn">＋ 新建任务</button>
   </div>
   <div class="dsh-tb-body" id="dsh-tb-body"></div>
 </div>`;
@@ -283,6 +388,162 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		syncCollapsed();
 	}
 
+	// ---- 侧边栏「最新对话」常驻小组件 -------------------------------------
+	// 不依赖任务看板是否打开：作为一个独立块钉在左侧栏顶部（New Session /
+	// 任务看板入口之下、会话/工作区树之上），跨工作区列出最近活跃的会话，
+	// 点击任意一条即打开并继续。数据取自 taskboard 的 /sessions 索引。
+	const RECENT_LIMIT = 15;
+	let recentEl = null;       // 外层容器（含头 + 列表体）
+	let recentBody = null;
+	let recentCollapsed = false;
+	let recentRefreshTimer = null;
+
+	function recentData() {
+		return api("/sessions").then((s) => s.sessions || []).catch(() => sessions);
+	}
+	// 用于展示/判重的标题：有 title 用 title，否则退回 id。
+	function titleKeyOf(s) {
+		return (s.title && String(s.title).trim()) ? String(s.title).trim() : String(s.id);
+	}
+	// 会话短 id（去掉 session- 前缀取前 8 位），用于区分同名会话。
+	function shortSid(sid) {
+		return String(sid).replace(/^session-/, "").slice(0, 8);
+	}
+	function recentList(all) {
+		// 只按【会话 id】去重（宿主本身已保证 id 唯一）。
+		// 绝不按标题去重：同一任务多次「＋ 新对话」的种子消息相同 → 派生标题相同，
+		// 按标题去重会把同一任务的多个关联对话合并成一条，导致「一个任务下只能看到
+		// 一个最最新的对话」。同名会话改由渲染层加短 id 后缀区分，不隐藏任何会话。
+		const seen = new Set();
+		const out = [];
+		for (const s of [...(all || [])]
+			.filter((x) => x && x.updatedAt)
+			.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) {
+			if (seen.has(s.id)) continue;
+			seen.add(s.id);
+			out.push(s);
+			if (out.length >= RECENT_LIMIT) break;
+		}
+		return out;
+	}
+	function currentSessionId() {
+		try {
+			const v = JSON.parse(localStorage.getItem("dsh.sessions.current") || "null");
+			return v && v.sessionId ? v.sessionId : null;
+		} catch { return null; }
+	}
+	// 已读游标：记录每个会话「我看到哪了」。存 localStorage（key 前缀 dsh-tb-read）。
+	// 语义：绿点 = 该会话已产生完成回复(未运行) 且 最新更新时间晚于已读时间 → 有新内容没看。
+	// 点开该会话时把已读时间推进到当前，绿点即消失；切到别的会话不影响它的已读状态。
+	function readCursorKey(sid) { return `dsh-tb-read:${sid}`; }
+	function readCursorOf(sid) {
+		try { return Number(localStorage.getItem(readCursorKey(sid))) || 0; } catch { return 0; }
+	}
+	function markSessionRead(sid) {
+		try { localStorage.setItem(readCursorKey(sid), String(Date.now())); } catch { /* ignore */ }
+	}
+	function renderRecent(all) {
+		if (recentBody === null) return;
+		const list = recentList(all);
+		const countEl = $("#dsh-recent-cnt");
+		if (countEl) countEl.textContent = String(list.length);
+		if (!list.length) {
+			recentBody.innerHTML = '<div class="dsh-recent-empty">（暂无最近会话）</div>';
+			return;
+		}
+		const curId = currentSessionId();
+		// 同名会话计数：同一任务多个「新对话」派生标题相同，给它们加短 id 后缀以便区分，
+		// 同时保证【不隐藏】任何一个会话。唯一标题不加后缀，保持与原生一致的干净观感。
+		const nameCount = new Map();
+		for (const s of list) {
+			const k = titleKeyOf(s);
+			nameCount.set(k, (nameCount.get(k) || 0) + 1);
+		}
+		recentBody.innerHTML = list.map((s) => {
+			const base = titleKeyOf(s);
+			const dup = (nameCount.get(base) || 0) > 1;
+			const isCur = s.id === curId;
+			// 点号语义（与原生一致：仅一个 slot 状态点）：
+			//   运行中 → 黄（模型正在生成）
+			//   已完成(未运行) 且 updatedAt > 已读游标 → 绿（有一轮回复还没看）
+			//   已读 或 无新内容 → 无点
+			let dot = "";
+			if (s.running) dot = `<span class="dot run"></span>`;
+			else if (s.updatedAt && s.updatedAt > readCursorOf(s.id)) dot = `<span class="dot idle"></span>`;
+			// 原生行单行：[slot点][标题(ellipsis)][同名时的短id][时间]；无预览、无仓库胶囊。
+			// 短 id 用独立 span（flex:none），保证标题被 ellipsis 截断时它依然可见可分辨。
+			return `<div class="dsh-recent-row${isCur ? " cur" : ""}" data-sid="${esc(s.id)}" title="打开并继续：${esc(base)}（${esc(s.id)}）">
+				<span class="slot">${dot}</span>
+				<span class="title">${esc(base)}</span>
+				${dup ? `<span class="sid">${esc(shortSid(s.id))}</span>` : ""}
+				<span class="time">${fmtTime(s.updatedAt)}</span>
+			</div>`;
+		}).join("");
+		$$(".dsh-recent-row", recentBody).forEach((el) => el.addEventListener("click", () => {
+			openSession(el.dataset.sid);
+		}));
+	}
+	function refreshRecent() {
+		recentData().then((all) => renderRecent(all)).catch(() => renderRecent(sessions));
+	}
+
+	function mountRecent() {
+		const root = sidebarRoot();
+		if (root === undefined) return;
+		if (recentEl === null) {
+			recentEl = document.createElement("div");
+			recentEl.id = "dsh-recent";
+			recentEl.className = "dsh-recent";
+			recentEl.innerHTML = `
+				<div class="dsh-recent-head" id="dsh-recent-head">
+					<span class="arrow">▼</span><span class="title">最新对话</span>
+					<span class="cnt" id="dsh-recent-cnt">0</span>
+					<button class="dsh-recent-refresh" id="dsh-recent-refresh" title="刷新">⟳</button>
+				</div>
+				<div class="dsh-recent-body" id="dsh-recent-body"></div>`;
+			recentBody = $("#dsh-recent-body", recentEl);
+			$("#dsh-recent-head", recentEl).addEventListener("click", () => {
+				recentCollapsed = !recentCollapsed;
+				if (recentEl) recentEl.classList.toggle("collapsed", recentCollapsed);
+				if (recentBody) recentBody.style.display = recentCollapsed ? "none" : "";
+			});
+			$("#dsh-recent-refresh", recentEl).addEventListener("click", (e) => {
+				e.stopPropagation();
+				refreshRecent();
+			});
+			renderRecent(sessions);
+			refreshRecent();
+		}
+		if (recentEl.parentElement === root) return;
+		// 插到 任务看板 入口（或 New Session 按钮）之后、会话树之前
+		const anchor = entryEl ?? newSessionButton(root);
+		root.insertBefore(recentEl, anchor?.nextElementSibling ?? null);
+		// 列表超高时内部滚动，避免把会话树挤出可视区
+		if (recentBody) {
+			recentBody.style.maxHeight = "46vh";
+			recentBody.style.overflowY = "auto";
+		}
+		const applyCollapse = () => {
+			if (recentBody) recentBody.style.display = recentCollapsed ? "none" : "";
+			if (recentEl) recentEl.classList.toggle("collapsed", recentCollapsed);
+		};
+		applyCollapse();
+		// 侧边栏收起为图标栏时隐藏整个小组件
+		const syncCollapsed = () => {
+			if (!recentEl) return;
+			if (sidebarIsCollapsed(root)) recentEl.style.display = "none";
+			else recentEl.style.display = "";
+		};
+		syncCollapsed();
+	}
+	function startRecentRefresher() {
+		if (recentRefreshTimer !== null) return;
+		recentRefreshTimer = setInterval(() => {
+			if (document.hidden) return;
+			refreshRecent();
+		}, 60000);
+	}
+
 	function bindViewEvents() {
 		$("#dsh-tb-new")?.addEventListener("click", openCreate);
 		$("#dsh-tb-refresh")?.addEventListener("click", () => refreshAll());
@@ -313,10 +574,9 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			const sel = $("#dsh-tb-repo-filter");
 			if (sel) {
 				const cur = sel.value;
-				sel.innerHTML = '<option value="">全部仓库</option>' + workspaces.map((x) => `<option value="${esc(x.title)}">${esc(x.title)}</option>`).join("");
+				sel.innerHTML = '<option value="">全部仓库</option>' + workspaces.map((x) => `<option value="${esc(x.path)}" title="${esc(x.path)}">${esc(repoShort(x.path))}</option>`).join("");
 				if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
 			}
-			// label options from all tasks
 			const all = await api("/tasks").catch(() => ({ tasks: [] }));
 			const labels = new Set();
 			for (const t of all.tasks || []) for (const l of t.labels || []) labels.add(l);
@@ -362,9 +622,204 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		const pr = PRIORITY_META[t.priority] || PRIORITY_META.medium;
 		return `<span class="dsh-tb-pill" style="color:${pr.color}">${pr.label}</span>`;
 	}
+	// 状态行动按钮：AI 自动流转，用户只在"评审中"时操作
+	function statusActionsHTML(task) {
+		const btn = (to, label, cls) => `<button type="button" class="dsh-tb-statusbtn ${cls || ""}" data-status="${to}">${label}</button>`;
+		switch (task.status) {
+			case "todo": return `${btn("in_progress", "▶ 开始执行")} ${btn("blocked", "⛔ 阻塞", "ghost")}`;
+			case "in_progress": return `${btn("in_review", "提交评审")} ${btn("blocked", "⛔ 阻塞", "ghost")}`;
+			case "in_review": return `${btn("done", "✅ 确认完成", "primary")} ${btn("in_progress", "↩ 退回修改")}`;
+			case "done": return `${btn("in_progress", "↩ 重新打开", "ghost")}`;
+			case "blocked": return `${btn("in_progress", "▶ 恢复进行")}`;
+			default: return "";
+		}
+	}
+	// 打开/继续一个会话。
+	// 优先走宿主原生「会话列表」的 in-app 切换（`open(id)`），这样不会整页 reload，
+	// 也就不会先闪一下「新建对话」页再跳到目标会话。原生 open 会同步更新
+	// dsh.sessions.current 持久化，因此刷新后仍停留在该会话。
+	// 若拿不到原生 open（结构变了/未渲染），回退到 localStorage + load 的老方式。
+	// 在 React fiber 树里发现宿主原生能力（不依赖会被哈希化的 CSS 类名）。
+	// 新版 Harness 的类名全部带哈希前缀，旧的 [class*="sessionRow"] 匹配不到，
+	// 会导致每次都回退整页 reload —— 而新版 reload 恢复会话后输入框是锁的，
+	// 必须手动拖拽才可用。因此这里改为从任意 React 托管节点向上到 root，
+	// 再广度遍历整棵树，收集 props 上的 open / startSession 回调。
+	let nativeCapabilitiesCache = null;
+	function reactRootFibers() {
+		const roots = new Set();
+		const seeds = document.querySelectorAll('[class*="centerCol"], [class*="sidebarCol"], [class*="frame"], [class*="App"], body > div');
+		for (const el of seeds) {
+			for (const k of Object.keys(el)) {
+				if (!k.startsWith("__reactFiber$") && !k.startsWith("__reactContainer$")) continue;
+				let f = el[k];
+				while (f && f.return) f = f.return;
+				if (f) roots.add(f);
+			}
+			if (roots.size > 0) break; // 一个 root 足够
+		}
+		return [...roots];
+	}
+	function discoverNativeCapabilities() {
+		if (nativeCapabilitiesCache && nativeCapabilitiesCache.open) return nativeCapabilitiesCache;
+		const found = { open: null, startSession: null };
+		const queue = reactRootFibers();
+		let guard = 0;
+		while (queue.length > 0 && guard++ < 40000) {
+			const f = queue.shift();
+			const mp = f.memoizedProps;
+			if (mp !== null && typeof mp === "object") {
+				if (found.open === null && typeof mp.open === "function") found.open = mp.open;
+				if (found.startSession === null && typeof mp.startSession === "function") found.startSession = mp.startSession;
+				// 有些层把 sessions 服务对象挂在 props 上
+				const svc = mp.sessions ?? mp.sessionService;
+				if (svc !== null && typeof svc === "object") {
+					if (found.open === null && typeof svc.open === "function") found.open = svc.open;
+					if (found.startSession === null && typeof svc.start === "function") found.startSession = svc.start;
+				}
+				if (found.open !== null && found.startSession !== null) break;
+			}
+			if (f.child) queue.push(f.child);
+			if (f.sibling) queue.push(f.sibling);
+		}
+		nativeCapabilitiesCache = found;
+		return found;
+	}
+	function findNativeSessionOpen() {
+		return discoverNativeCapabilities().open;
+	}
+	/** 读取宿主持久化的当前会话 id。 */
+	function currentSessionId() {
+		try {
+			const raw = localStorage.getItem("dsh.sessions.current");
+			if (raw === null) return null;
+			const parsed = JSON.parse(raw);
+			return typeof parsed?.sessionId === "string" ? parsed.sessionId : null;
+		} catch { return null; }
+	}
+	/** 轮询等待宿主把当前会话切到新会话，返回新会话 id。 */
+	function waitForNewSession(previousId, timeoutMs = 4000) {
+		const deadline = Date.now() + timeoutMs;
+		return new Promise((resolve) => {
+			const tick = () => {
+				const now = currentSessionId();
+				if (now !== null && now !== previousId) return resolve(now);
+				if (Date.now() > deadline) return resolve(null);
+				setTimeout(tick, 120);
+			};
+			tick();
+		});
+	}
+	/**
+	* 触发宿主原生「新建会话」（页面内创建，输入框天然可用）。
+	* 找不到原生回调时退化为点击侧边栏的新建按钮。
+	*/
+	function startNativeSession() {
+		const caps = discoverNativeCapabilities();
+		if (typeof caps.startSession === "function") {
+			try { caps.startSession(); return true; } catch { /* fall through */ }
+		}
+		const btn = document.querySelector('button[class*="newSession"]');
+		if (btn !== null) { btn.click(); return true; }
+		return false;
+	}
+	/**
+	* 新版 Harness reload 恢复会话后输入框会被锁，手动拖拽布局分隔条可恢复。
+	* 这里用合成指针事件复现那次拖拽：临时打桩 pointer capture 相关 API，
+	* 依次派发 pointerdown → pointermove(1px) → pointerup。
+	*/
+	function simulateHandleDrag() {
+		const handle = [...document.querySelectorAll('[class*="_handle"], [class*="handle"]')]
+			.find((el) => el.offsetParent !== null && getComputedStyle(el).cursor === "col-resize");
+		if (!handle) return false;
+		const rect = handle.getBoundingClientRect();
+		const x = Math.round(rect.left + rect.width / 2);
+		const y = Math.round(rect.top + Math.min(200, rect.height / 2));
+		const proto = Element.prototype;
+		const origSet = proto.setPointerCapture;
+		const origHas = proto.hasPointerCapture;
+		const origRelease = proto.releasePointerCapture;
+		try {
+			proto.setPointerCapture = function () {};
+			proto.hasPointerCapture = function () { return true; };
+			proto.releasePointerCapture = function () {};
+			const mk = (type, clientX) => new PointerEvent(type, {
+				bubbles: true, cancelable: true, composed: true,
+				pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 1,
+				clientX, clientY: y
+			});
+			handle.dispatchEvent(mk("pointerdown", x));
+			handle.dispatchEvent(mk("pointermove", x + 1));
+			handle.dispatchEvent(mk("pointerup", x + 1));
+			return true;
+		} catch {
+			return false;
+		} finally {
+			proto.setPointerCapture = origSet;
+			proto.hasPointerCapture = origHas;
+			proto.releasePointerCapture = origRelease;
+		}
+	}
 	function openSession(sid) {
-		try { localStorage.setItem("dsh.sessions.current", JSON.stringify({ sessionId: sid })); } catch { /* ignore */ }
+		// 点开即视为已读：推进该会话的已读游标，使它的绿点(有新回复没看)消失。
+		markSessionRead(sid);
+		try {
+			const open = findNativeSessionOpen();
+			if (typeof open === "function") {
+				// 先同步写入目标会话，保证「最新对话」能立即把该行标为当前。
+				// 原生 open() 之后也会持久化同一值，二者一致。
+				try { localStorage.setItem("dsh.sessions.current", JSON.stringify({ sessionId: sid })); } catch { /* ignore */ }
+				open(sid);
+				// 原位切换后：关掉任务看板（含打开的详情弹窗），让对话重新可见。
+				if (isOpen()) toggle(false);
+				$$(".dsh-tb-modal-mask").forEach((m) => m.remove());
+				// 立即重绘「最新对话」：被打开的会话行去掉绿点、加上当前高亮。
+				refreshRecent();
+				return;
+			}
+		} catch { /* fall through to reload */ }
+		// 回退：持久化后整页加载。新版 Harness reload 恢复会话后输入框会被锁，
+		// 这里留下标记，页面加载后自动模拟一次布局分隔条拖拽把输入框解锁。
+		try {
+			localStorage.setItem("dsh.sessions.current", JSON.stringify({ sessionId: sid }));
+			localStorage.setItem("dsh-taskboard.unstick", String(Date.now()));
+		} catch { /* ignore */ }
 		location.reload();
+	}
+
+	/**
+	* 为任务新建对话：触发宿主原生「新建会话」（页面内创建，不走 reload），
+	* 轮询到新会话 id 后绑定到任务。原生路径不可用时回退到 host 冷会话 + reload。
+	*/
+	async function newConversationForTask(taskId) {
+		const before = currentSessionId();
+		if (startNativeSession()) {
+			const newId = await waitForNewSession(before, 4500);
+			if (newId !== null) {
+				try {
+					await api(`/tasks/${taskId}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: newId, action: "link" }) });
+				} catch { /* 绑定失败不阻塞对话 */ }
+				await refreshAll();
+				toast("✓ 已新建对话并绑定到该任务");
+				return true;
+			}
+		}
+		// 回退：host 侧创建（含任务上下文种子）后整页打开
+		try {
+			const { sessionId } = await api(`/tasks/${taskId}/session`, { method: "POST", body: "{}" });
+			openSession(sessionId);
+			return true;
+		} catch (err) {
+			alert(`新建对话失败：${err.message}`);
+			return false;
+		}
+	}
+	// 轻量操作反馈提示
+	function toast(text) {
+		const el = document.createElement("div");
+		el.className = "dsh-tb-toast";
+		el.textContent = text;
+		document.body.appendChild(el);
+		setTimeout(() => el.remove(), 1600);
 	}
 
 	// ---- render: overview --------------------------------------------------
@@ -378,31 +833,46 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			(byRepo[r] ||= []).push(t);
 		}
 		const total = tasks.length;
+		const doneN = stats.done || 0;
+		const pct = total ? Math.round((doneN / total) * 100) : 0;
 		const sessionsByRepo = {};
 		for (const s of sessions) if (s.repo) (sessionsByRepo[s.repo] ||= []).push(s);
 		const recent = [...tasks].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 10);
 
-		const statEls = [
-			["全部", total, "#e6edf3"],
-			...STATUS_ORDER.map((s) => [STATUS_META[s].label, stats[s] || 0, STATUS_META[s].color])
-		].map(([label, n, color]) => `<div class="dsh-tb-ov-stat"><div class="n" style="color:${color}">${n}</div><div class="l">${label}</div></div>`).join("");
+		const addCard = `<div class="dsh-tb-ov-stat dsh-tb-ov-add" id="dsh-tb-ov-new" title="新建任务"><div class="dsh-tb-ov-addbtn">＋ 新建任务</div></div>`;
+		const statEls = addCard + [
+			["全部任务", total, "#e6edf3", ""],
+			...STATUS_ORDER.map((s) => [STATUS_META[s].label, stats[s] || 0, STATUS_META[s].color, s]),
+			["完成率", `${pct}%`, "#3fb950", null]
+		].map(([label, n, color, status]) => {
+			const bar = label === "完成率" ? pct : total ? Math.round((n / total) * 100) : 0;
+			const clickable = status !== null ? " dsh-tb-ov-stat-click" : "";
+			const title = status === "" ? "查看全部任务" : status ? `查看「${label}」的任务` : "";
+			return `<div class="dsh-tb-ov-stat${clickable}" ${status !== null ? `data-status="${status}"` : ""} title="${title}"><div class="n" style="color:${color}">${n}</div><div class="l">${label}</div><div class="mini"><i style="width:${bar}%;background:${color}"></i></div></div>`;
+		}).join("");
 
 		let wsCards;
 		if (!workspaces.length) {
 			wsCards = '<div class="dsh-tb-empty">（暂无工作区）</div>';
 		} else {
 			wsCards = workspaces.map((w) => {
-				const tlist = byRepo[w.title] || [];
+				const tlist = byRepo[w.path] || byRepo[w.title] || [];
 				const counts = STATUS_ORDER.map((s) => tlist.filter((t) => t.status === s).length);
-				const pills = STATUS_ORDER.map((s, i) => counts[i] ? `<span class="dsh-tb-pill" style="color:${STATUS_META[s].color}">${STATUS_META[s].label} ${counts[i]}</span>` : "").join("");
-				const sessN = (sessionsByRepo[w.title] || []).length;
+				const n = tlist.length;
+				const doneCnt = counts[STATUS_ORDER.indexOf("done")] || 0;
+				const wsPct = n ? Math.round((doneCnt / n) * 100) : 0;
+				const stack = n ? STATUS_ORDER.map((s, i) => counts[i] ? `<i style="width:${Math.round((counts[i] / n) * 100)}%;background:${STATUS_META[s].color}" title="${STATUS_META[s].label} ${counts[i]}"></i>` : "").join("") : "";
+				const statLine = STATUS_ORDER.map((s, i) => counts[i] ? `<span class="st"><i class="dot" style="background:${STATUS_META[s].color}"></i>${STATUS_META[s].label} <b>${counts[i]}</b></span>` : "").join("");
+				const sessN = (sessionsByRepo[w.path] || sessionsByRepo[w.title] || []).length;
 				const g = gitState[w.path];
 				const branch = g ? `<span class="branch">⎇ ${esc(g.branch)}</span>${g.dirty ? `<span class="branch dirty" title="${g.dirty} 个未提交文件">●${g.dirty}</span>` : ""}` : "";
-				const sessList = (sessionsByRepo[w.title] || []).slice(0, 3).map((s) => `<div class="s" data-sid="${esc(s.id)}" title="打开会话 ${esc(s.id)}">▸ ${esc(s.title)}</div>`).join("");
-				return `<div class="dsh-tb-ov-ws" data-repo="${esc(w.title)}">
-					<h4>${esc(w.title)}</h4>
+				const sessList = (sessionsByRepo[w.path] || sessionsByRepo[w.title] || []).slice(0, 3).map((s) => `<div class="s" data-sid="${esc(s.id)}" title="打开会话 ${esc(s.id)}">▸ ${esc(s.title)}</div>`).join("");
+				return `<div class="dsh-tb-ov-ws" data-repo="${esc(w.path)}">
+					<div class="ws-head"><h4>${esc(w.title)}</h4><span class="ws-total">${n} 个任务</span></div>
 					<div class="path">${esc(w.path || "")}</div>
-					<div class="meta">${pills || '<span class="dsh-tb-empty" style="padding:0">无任务</span>'}${branch}<span class="sess">会话 ${sessN}</span></div>
+					${n ? `<div class="stack">${stack}</div><div class="ws-stats">${statLine}</div>` : '<div class="ws-stats" style="color:var(--dsw-alias-label-secondary,#9aa7b4)">暂无任务，点「＋ 新建」创建</div>'}
+					<div class="comp"><span class="pct">完成率 ${wsPct}%</span><div class="track"><i style="width:${wsPct}%"></i></div></div>
+					<div class="meta">${branch}<span class="sess">会话 ${sessN}</span></div>
 					${sessList ? `<div class="sesslist">${sessList}</div>` : ""}
 				</div>`;
 			}).join("");
@@ -413,7 +883,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			return `<div class="dsh-tb-ov-item" data-id="${esc(t.id)}">
 				<span class="dot" style="background:${st.color}"></span>
 				<span class="t">${esc(t.title)}</span>
-				${t.repo ? `<span class="r">${esc(t.repo)}</span>` : ""}
+				${t.repo ? `<span class="r">${esc(repoShort(t.repo))}</span>` : ""}
 				<span class="tm">${fmtTime(t.updatedAt)}</span>
 			</div>`;
 		}).join("") : '<div class="dsh-tb-empty">（暂无任务）</div>';
@@ -427,6 +897,13 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			<div class="dsh-tb-ov-sec">最近更新</div>
 			<div class="dsh-tb-ov-recent">${recentEls}</div>
 		</div>`;
+		$("#dsh-tb-ov-new")?.addEventListener("click", openCreate);
+		$$(".dsh-tb-ov-stat[data-status]").forEach((el) => el.addEventListener("click", () => {
+			filter.status = el.dataset.status; // ""=全部
+			view = "list";
+			render();
+			refreshTasks();
+		}));
 		$$(".dsh-tb-ov-ws").forEach((el) => el.addEventListener("click", () => {
 			filter.repo = el.dataset.repo;
 			const sel = $("#dsh-tb-repo-filter");
@@ -439,7 +916,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			e.stopPropagation();
 			openSession(el.dataset.sid);
 		}));
-		$$(".dsh-tb-ov-item").forEach((el) => el.addEventListener("click", () => openDetail(el.dataset.id)));
+		$$(".dsh-tb-ov-item").forEach((el) => el.addEventListener("click", () => { if (el.dataset.id) openDetail(el.dataset.id); }));
 	}
 
 	// ---- render: kanban ----------------------------------------------------
@@ -448,7 +925,8 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		const pr = PRIORITY_META[t.priority] || PRIORITY_META.medium;
 		const badges = [];
 		badges.push(priPill(t));
-		if (t.repo) badges.push(`<span class="dsh-tb-pill" style="color:#79c0ff">${esc(t.repo)}</span>`);
+		if (t.status === "in_review") badges.push(`<span class="dsh-tb-pill" style="color:#bc8cff;font-weight:600">◉ 待 review</span>`);
+		if (t.repo) badges.push(`<span class="dsh-tb-pill" style="color:#79c0ff">${esc(repoShort(t.repo))}</span>`);
 		if (t.feature) badges.push(`<span class="dsh-tb-pill" style="color:#d2a8ff">${esc(t.feature)}</span>`);
 		badges.push(labelPills(t));
 		if (t.review && t.review !== "none") badges.push(`<span class="dsh-tb-pill" style="color:${t.review === "approved" ? "#3fb950" : t.review === "rejected" ? "#f85149" : "#d29922"}">${REVIEW_META[t.review]}</span>`);
@@ -460,7 +938,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		return `<div class="dsh-tb-card" data-id="${esc(t.id)}" style="border-left:3px solid ${st.color}">
 			<div class="dsh-tb-card-title">${esc(t.title)}</div>
 			<div class="dsh-tb-card-meta">${badges.join("")}</div>
-			${t.progress > 0 ? `<div class="dsh-tb-bar"><i style="width:${Math.min(100, t.progress)}%"></i></div>` : ""}
+			${t.displayProgress > 0 ? `<div class="dsh-tb-bar"><i style="width:${Math.min(100, t.displayProgress)}%"></i></div>` : ""}
 			<div class="dsh-tb-card-foot">${foot.join(" · ")}</div>
 		</div>`;
 	}
@@ -492,17 +970,17 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		if (!body) return;
 		if (countEl) countEl.textContent = `${tasks.length} 个任务`;
 		if (!tasks.length) {
-			body.innerHTML = '<div class="dsh-tb-ov"><div class="dsh-tb-empty">（暂无任务，点右上角「＋ 新建」）</div></div>';
+			body.innerHTML = '<div class="dsh-tb-ov"><div class="dsh-tb-empty">（暂无任务，点「＋ 新建」创建）</div></div>';
 			return;
 		}
 		const rows = tasks.map((t) => `<tr data-id="${esc(t.id)}">
 			<td>${statusPill(t)}</td>
 			<td>${priPill(t)}</td>
 			<td style="max-width:340px"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.title)}</div></td>
-			<td>${t.repo ? `<span class="dsh-tb-pill" style="color:#79c0ff">${esc(t.repo)}</span>` : ""}</td>
+			<td>${t.repo ? `<span class="dsh-tb-pill" style="color:#79c0ff">${esc(repoShort(t.repo))}</span>` : ""}</td>
 			<td style="max-width:140px"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.feature || "")}</div></td>
 			<td>${labelPills(t)}</td>
-			<td style="min-width:90px">${t.progress > 0 ? `<div class="dsh-tb-bar" style="margin:0"><i style="width:${Math.min(100, t.progress)}%"></i></div>` : ""}</td>
+			<td style="min-width:90px">${t.displayProgress > 0 ? `<div class="dsh-tb-bar" style="margin:0"><i style="width:${Math.min(100, t.displayProgress)}%"></i></div>` : ""}</td>
 			<td>${t.review !== "none" ? `<span class="dsh-tb-pill" style="color:${t.review === "approved" ? "#3fb950" : t.review === "rejected" ? "#f85149" : "#d29922"}">${REVIEW_META[t.review]}</span>` : ""}</td>
 			<td>${t.test !== "none" ? `<span class="dsh-tb-pill" style="color:${t.test === "passed" ? "#3fb950" : t.test === "failed" ? "#f85149" : "#d29922"}">${TEST_META[t.test]}</span>` : ""}</td>
 			<td style="white-space:nowrap">${fmtTime(t.updatedAt)}</td>
@@ -529,70 +1007,171 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	}
 
 	// ---- create modal ------------------------------------------------------
-	function fieldRow(id, label, control) {
-		return `<div class="dsh-tb-field"><label for="${id}">${label}</label>${control}</div>`;
-	}
-
 	function openCreate() {
 		const mask = document.createElement("div");
 		mask.className = "dsh-tb-modal-mask";
-		const repoOptions = workspaces.map((w) => `<option value="${esc(w.title)}">${esc(w.title)}</option>`).join("");
-		mask.innerHTML = `<div class="dsh-tb-modal">
-			<h3>新建任务</h3>
-			${fieldRow("tb-f-title", "标题 *", '<input id="tb-f-title" placeholder="任务标题" />')}
-			<div class="dsh-tb-row">
-				${fieldRow("tb-f-repo", "仓库", `<select id="tb-f-repo"><option value="">（无）</option>${repoOptions}</select>`)}
-				${fieldRow("tb-f-feature", "分支/feature", '<input id="tb-f-feature" placeholder="如 feat-xxx" />')}
-			</div>
-			<div class="dsh-tb-row">
-				${fieldRow("tb-f-priority", "优先级", `<select id="tb-f-priority">${Object.entries(PRIORITY_META).map(([k, v]) => `<option value="${k}" ${k === "medium" ? "selected" : ""}>${v.label}</option>`).join("")}</select>`)}
-				${fieldRow("tb-f-status", "状态", `<select id="tb-f-status">${Object.entries(STATUS_META).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join("")}</select>`)}
-			</div>
-			${fieldRow("tb-f-labels", "标签（逗号分隔）", `<input id="tb-f-labels" placeholder="如 bug, 后端, P1" list="tb-labels-datalist" /><datalist id="tb-labels-datalist">${allLabels.map((l) => `<option value="${esc(l)}"></option>`).join("")}</datalist>`)}
-			${fieldRow("tb-f-desc", "描述", '<textarea id="tb-f-desc" placeholder="需求/实现方式/验收标准…"></textarea>')}
-			<div class="dsh-tb-actions">
-				<button data-act="cancel">取消</button>
-				<button data-act="save" class="dsh-tb-primary">创建</button>
-			</div>
-		</div>`;
-		document.body.appendChild(mask);
+		const repoOptions = workspaces.map((w) => `<option value="${esc(w.path)}" title="${esc(w.path)}">${esc(w.path)}</option>`).join("");
+		const markErr = (sel, hint) => {
+			$(sel, mask)?.classList.add("err");
+			if (hint) $(hint, mask).hidden = false;
+		};
+		const renderForm = () => {
+			mask.innerHTML = `<div class="dsh-tb-modal" style="width:min(560px,92vw)">
+				<h3>新建任务</h3>
+				<div class="dsh-tb-field">
+					<label for="tb-f-title">标题 *</label>
+					<input id="tb-f-title" placeholder="一句话说明要做什么" />
+					<div class="dsh-tb-hint" id="tb-hint-title" hidden>请填写任务标题</div>
+				</div>
+				<div class="dsh-tb-row">
+					<div class="dsh-tb-field">
+						<label for="tb-f-repo">仓库目录 *</label>
+						<select id="tb-f-repo"><option value="" disabled selected>请选择工作区目录（新建的对话会挂到这个工作区）</option>${repoOptions}</select>
+						<div class="dsh-tb-hint" id="tb-hint-repo" hidden>请选择任务所属的工作区目录</div>
+					</div>
+					<div class="dsh-tb-field">
+						<label for="tb-f-feature">分支 / feature</label>
+						<input id="tb-f-feature" placeholder="如 feat-xxx" />
+					</div>
+				</div>
+				<div class="dsh-tb-field">
+					<label for="tb-f-desc">描述</label>
+					<textarea id="tb-f-desc" placeholder="需求背景 / 实现方式 / 验收标准…"></textarea>
+				</div>
+				<div class="dsh-tb-actions">
+					<button data-act="cancel">取消</button>
+					<button data-act="save" class="dsh-tb-primary">创建任务</button>
+				</div>
+			</div>`;
+			$("#tb-f-title", mask).addEventListener("input", () => { $("#tb-f-title", mask).classList.remove("err"); $("#tb-hint-title", mask).hidden = true; });
+			$("#tb-f-repo", mask).addEventListener("change", () => { $("#tb-f-repo", mask).classList.remove("err"); $("#tb-hint-repo", mask).hidden = true; });
+			$('[data-act="cancel"]', mask).addEventListener("click", close);
+			$('[data-act="save"]', mask).addEventListener("click", async () => {
+				const title = $("#tb-f-title", mask).value.trim();
+				const repo = $("#tb-f-repo", mask).value;
+				$("#tb-hint-title", mask).hidden = true;
+				$("#tb-hint-repo", mask).hidden = true;
+				$$(".err", mask).forEach((el) => el.classList.remove("err"));
+				let ok = true;
+				if (!title) { markErr("#tb-f-title", "#tb-hint-title"); ok = false; }
+				if (!repo) { markErr("#tb-f-repo", "#tb-hint-repo"); ok = false; }
+				if (!ok) return;
+				try {
+					const { task } = await api("/tasks", { method: "POST", body: JSON.stringify({
+						title,
+						repo,
+						feature: $("#tb-f-feature", mask).value.trim(),
+						description: $("#tb-f-desc", mask).value
+					}) });
+					refreshAll();
+					showSuccess(task);
+				} catch (err) { alert(`创建失败：${err.message}`); }
+			});
+			$("#tb-f-title", mask).focus();
+		};
+		const showSuccess = (task) => {
+			mask.innerHTML = `<div class="dsh-tb-modal" style="width:min(560px,92vw)">
+				<h3>✅ 任务已创建</h3>
+				<div class="dsh-tb-created-title">${esc(task.title)}</div>
+				<div class="dsh-tb-created-meta">${esc(task.repo)}${task.feature ? ` · ${esc(task.feature)}` : ""}</div>
+				<div class="dsh-tb-created-next">接下来做什么？</div>
+				<div class="dsh-tb-created-actions">
+					<button data-act="newsess" class="dsh-tb-primary dsh-tb-big">➕ 新建对话开始干活</button>
+					<button data-act="bind" class="dsh-tb-big">🔗 绑定已有会话</button>
+					<button data-act="detail" class="dsh-tb-big">进入任务详情</button>
+				</div>
+				<div class="dsh-tb-actions" style="margin-top:12px">
+					<button data-act="close">关闭</button>
+				</div>
+			</div>`;
+			$('[data-act="newsess"]', mask).addEventListener("click", async () => {
+				mask.remove();
+				await newConversationForTask(task.id);
+			});
+			$('[data-act="bind"]', mask).addEventListener("click", () => { mask.remove(); openDetail(task.id); });
+			$('[data-act="detail"]', mask).addEventListener("click", () => { mask.remove(); openDetail(task.id); });
+			$('[data-act="close"]', mask).addEventListener("click", () => mask.remove());
+		};
 		const close = () => mask.remove();
-		$('[data-act="cancel"]', mask).addEventListener("click", close);
 		mask.addEventListener("click", (e) => { if (e.target === mask) close(); });
-		$('[data-act="save"]', mask).addEventListener("click", async () => {
-			const payload = {
-				title: $("#tb-f-title", mask).value,
-				repo: $("#tb-f-repo", mask).value,
-				feature: $("#tb-f-feature", mask).value.trim(),
-				priority: $("#tb-f-priority", mask).value,
-				status: $("#tb-f-status", mask).value,
-				labels: $("#tb-f-labels", mask).value.split(",").map((s) => s.trim()).filter(Boolean),
-				description: $("#tb-f-desc", mask).value
-			};
-			if (!payload.title.trim()) { $("#tb-f-title", mask).focus(); return; }
-			try {
-				const { task } = await api("/tasks", { method: "POST", body: JSON.stringify(payload) });
-				close();
-				refreshAll();
-				openDetail(task.id);
-			} catch (err) { alert(`创建失败：${err.message}`); }
-		});
-		$("#tb-f-title", mask).focus();
+		document.body.appendChild(mask);
+		renderForm();
 	}
 
 	// ---- detail modal ------------------------------------------------------
+	// 选择会话关联：搜索 + 按工作区分组 + 按更新时间排序
+	function openSessionPicker(taskId, onLinked) {
+		api("/sessions").then((fresh) => {
+			const pickMask = document.createElement("div");
+			pickMask.className = "dsh-tb-modal-mask";
+			pickMask.innerHTML = `<div class="dsh-tb-modal" style="width:min(600px,92vw)">
+				<h3>选择会话关联</h3>
+				<div class="dsh-tb-field"><input id="tb-pick-search" placeholder="搜索会话标题…" /></div>
+				<div class="dsh-tb-picklist" id="tb-pick-list">加载中…</div>
+				<div class="dsh-tb-actions"><button data-act="cancel">取消</button></div>
+			</div>`;
+			document.body.appendChild(pickMask);
+			const allSessions = fresh.sessions || sessions;
+			const listEl = $("#tb-pick-list", pickMask);
+			const render = (q) => {
+				const ql = String(q || "").trim().toLowerCase();
+				const list = allSessions.filter((s) => !ql || String(s.title || "").toLowerCase().includes(ql));
+				const groups = {};
+				for (const s of list) { const k = s.repo || "（未指定）"; (groups[k] ||= []).push(s); }
+				const html = Object.entries(groups)
+					.sort((a, b) => b[1].length - a[1].length)
+					.map(([repo, items]) => {
+						items.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+						return `<div class="dsh-tb-pick-group">
+							<div class="dsh-tb-pick-grouphead">${esc(repoShort(repo))} <b>${items.length}</b></div>
+							${items.map((s) => `<div class="dsh-tb-pick-item" data-sid="${esc(s.id)}">
+								<div class="t">${esc(s.title || s.id)}${s.running ? ` <span class="dsh-tb-run">● 运行中</span>` : ""}</div>
+								<div class="m">${s.updatedAt ? fmtTime(s.updatedAt) : ""}</div>
+							</div>`).join("")}
+						</div>`;
+					}).join("");
+				listEl.innerHTML = html || '<div class="dsh-tb-empty">（无匹配会话）</div>';
+				$$(".dsh-tb-pick-item", pickMask).forEach((el) => el.addEventListener("click", async () => {
+					const sid = el.dataset.sid;
+					try {
+						const { task: lk, injected, injectionNote } = await api(`/tasks/${taskId}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: sid, action: "link" }) });
+						pickMask.remove();
+						await refreshTasks();
+						onLinked(lk);
+						toast(injected ? "✓ 已关联会话（已注入任务上下文）" : (injectionNote || "已关联会话"));
+					} catch (err) { alert(`关联失败：${err.message}`); }
+				}));
+			};
+			render("");
+			$("#tb-pick-search", pickMask).addEventListener("input", () => render($("#tb-pick-search", pickMask).value));
+			$('[data-act="cancel"]', pickMask).addEventListener("click", () => pickMask.remove());
+			pickMask.addEventListener("click", (e) => { if (e.target === pickMask) pickMask.remove(); });
+			$("#tb-pick-search", pickMask).focus();
+		}).catch(() => alert("获取会话列表失败"));
+	}
+
 	async function openDetail(id) {
 		const { task } = await api(`/tasks/${id}`);
+		buildDetail(task);
+	}
+
+	function buildDetail(task) {
+		const id = task.id;
 		const mask = document.createElement("div");
 		mask.className = "dsh-tb-modal-mask";
-		const sessOptions = sessions.map((s) => `<option value="${esc(s.id)}">${esc(s.title || s.id)}${s.repo ? ` · ${esc(s.repo)}` : ""}</option>`).join("");
+		const sessOptions = sessions.map((s) => `<option value="${esc(s.id)}">${esc(s.title || s.id)}${s.repo ? ` · ${esc(repoShort(s.repo))}` : ""}</option>`).join("");
 		mask.innerHTML = `<div class="dsh-tb-modal" style="width:min(700px,92vw)">
 			<h3>${esc(task.title)}</h3>
-			<div class="dsh-tb-field"><label>仓库 / 分支</label><input id="tb-d-repo" value="${esc(task.repo)}" /><input id="tb-d-feature" value="${esc(task.feature)}" placeholder="feature/分支" style="margin-top:6px" /></div>
+			<div class="dsh-tb-field"><label>仓库目录（工作区路径）</label><input id="tb-d-repo" placeholder="/root/projects/…" value="${esc(task.repo)}" /><input id="tb-d-feature" value="${esc(task.feature)}" placeholder="feature/分支" style="margin-top:6px" /></div>
 			<div class="dsh-tb-row">
-				<div class="dsh-tb-field"><label>状态</label><select id="tb-d-status">${Object.entries(STATUS_META).map(([k, v]) => `<option value="${k}" ${k === task.status ? "selected" : ""}>${v.label}</option>`).join("")}</select></div>
+				<div class="dsh-tb-field"><label>状态（AI 自动流转，你只需在"评审中"时处理）</label>
+					<div class="dsh-tb-statusline">
+						<span class="dsh-tb-statusbadge" style="color:${STATUS_META[task.status].color};border-color:${STATUS_META[task.status].color}55;background:${STATUS_META[task.status].color}14">${STATUS_META[task.status].label}</span>
+						<div class="dsh-tb-statusactions">${statusActionsHTML(task)}</div>
+					</div>
+				</div>
 				<div class="dsh-tb-field"><label>优先级</label><select id="tb-d-priority">${Object.entries(PRIORITY_META).map(([k, v]) => `<option value="${k}" ${k === task.priority ? "selected" : ""}>${v.label}</option>`).join("")}</select></div>
-				<div class="dsh-tb-field"><label>进度 ${task.progress}%</label><input id="tb-d-progress" type="range" min="0" max="100" value="${task.progress}" /></div>
+				<div class="dsh-tb-field"><label>进度 ${task.displayProgress ?? task.progress}%（自动派生）</label><input id="tb-d-progress" type="range" min="0" max="100" value="${task.progress}" /></div>
 			</div>
 			<div class="dsh-tb-row">
 				<div class="dsh-tb-field"><label>Review</label><select id="tb-d-review">${Object.entries(REVIEW_META).map(([k, v]) => `<option value="${k}" ${k === task.review ? "selected" : ""}>${v}</option>`).join("")}</select></div>
@@ -600,32 +1179,75 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				<div class="dsh-tb-field"><label>标签</label><input id="tb-d-labels" value="${esc((task.labels || []).join(", "))}" placeholder="逗号分隔" list="tb-labels-datalist2" /><datalist id="tb-labels-datalist2">${allLabels.map((l) => `<option value="${esc(l)}"></option>`).join("")}</datalist></div>
 			</div>
 			<div class="dsh-tb-field"><label>描述</label><textarea id="tb-d-desc">${esc(task.description || "")}</textarea></div>
+			<div class="dsh-tb-field"><label>共享上下文（池内会话可访问：新对话自动带、关联会话自动注入、也可复制随时取最新版）</label>
+				<div class="dsh-tb-ctx">
+					<div class="dsh-tb-ctx-body" id="tb-d-ctx-body">加载中…</div>
+					<div class="dsh-tb-ctx-actions">
+						<button id="tb-d-ctx-copy" title="复制最新上下文到剪贴板">📋 复制</button>
+						<button id="tb-d-ctx-refresh" title="重新获取最新上下文">⟳ 刷新</button>
+					</div>
+				</div>
+			</div>
 			<div class="dsh-tb-field"><label>进展记录（${(task.notes || []).length}）</label>
 				<div id="tb-d-notes">${(task.notes || []).map((n) => `<div class="dsh-tb-note"><span class="dsh-tb-note-time">${fmtTime(n.at)}</span><br/>${esc(n.text)}</div>`).join("") || '<div class="dsh-tb-note">（暂无记录）</div>'}</div>
 				<textarea id="tb-d-note" placeholder="添加进展/完成情况…（Ctrl+Enter 提交）" style="margin-top:6px"></textarea>
 			</div>
-			<div class="dsh-tb-field"><label>关联会话（点击打开可继续）</label>
+			<div class="dsh-tb-field"><label>池内会话（共享上下文可访问者；点击打开可继续）</label>
 				<div id="tb-d-sessions">${(task.sessionIds || []).map((sid) => {
 					const s = sessions.find((x) => x.id === sid);
-					return `<div class="dsh-tb-sess"><span class="dsh-tb-sess-title" title="${esc(sid)}">${esc(s ? s.title : sid)}</span><button data-sid="${esc(sid)}" data-act="open" class="dsh-tb-open">打开</button><button data-sid="${esc(sid)}" data-act="unlink">解除</button></div>`;
+					return `<div class="dsh-tb-sess"><span class="dsh-tb-sess-title" title="${esc(sid)}">${esc(s ? s.title : sid)}${s && s.running ? ` <span class="dsh-tb-run">● 运行中</span>` : ""}</span><button data-sid="${esc(sid)}" data-act="open" class="dsh-tb-open">打开</button><button data-sid="${esc(sid)}" data-act="unlink">解除</button></div>`;
 				}).join("") || '<div class="dsh-tb-note">（未关联会话）</div>'}</div>
 				<div class="dsh-tb-row" style="margin-top:6px">
-					<select id="tb-d-sess-pick" style="flex:1">${sessOptions || '<option value="">（暂无会话）</option>'}</select>
-					<button id="tb-d-sess-link">关联</button>
+					<button id="tb-d-sess-open" style="flex:1" title="按工作区分组、按更新时间排序、可搜索">🔍 选择会话关联</button>
+					<button id="tb-d-sess-new" title="新建一个绑定到此任务的对话">＋ 新对话</button>
 				</div>
 			</div>
 			<div class="dsh-tb-actions">
 				<button data-act="del" class="dsh-tb-danger">删除</button>
+				<button data-act="copyctx" title="复制任务上下文（可粘到任意对话里带上背景）">📋 复制上下文</button>
+				<button data-act="split" title="大任务拆成多个小任务">✂ 拆分</button>
 				<button data-act="cancel">关闭</button>
 				<button data-act="save" class="dsh-tb-primary dsh-tb-grow">保存</button>
 			</div>
 		</div>`;
 		document.body.appendChild(mask);
 
+		// 共享上下文：加载最新版 + 复制 + 刷新
+		const loadCtx = async () => {
+			const bodyEl = $("#tb-d-ctx-body", mask);
+			if (!bodyEl) return;
+			try {
+				const { context } = await api(`/tasks/${id}/context`);
+				bodyEl.textContent = context || "（暂无共享上下文）";
+			} catch {
+				bodyEl.textContent = "（获取失败）";
+			}
+		};
+		const copyCtx = async () => {
+			try {
+				const { context } = await api(`/tasks/${id}/context`);
+				await navigator.clipboard.writeText(context || "");
+				toast("✓ 已复制最新共享上下文");
+			} catch {
+				try {
+					const { context } = await api(`/tasks/${id}/context`);
+					const ta = document.createElement("textarea");
+					ta.value = context || "";
+					document.body.appendChild(ta);
+					ta.select();
+					document.execCommand("copy");
+					ta.remove();
+					toast("✓ 已复制最新共享上下文");
+				} catch (err) { alert(`复制失败：${err.message}`); }
+			}
+		};
+		void loadCtx();
+		$("#tb-d-ctx-refresh", mask)?.addEventListener("click", loadCtx);
+		$("#tb-d-ctx-copy", mask)?.addEventListener("click", copyCtx);
+
 		const state = () => ({
 			repo: $("#tb-d-repo", mask).value.trim(),
 			feature: $("#tb-d-feature", mask).value.trim(),
-			status: $("#tb-d-status", mask).value,
 			priority: $("#tb-d-priority", mask).value,
 			progress: Number($("#tb-d-progress", mask).value),
 			review: $("#tb-d-review", mask).value,
@@ -634,49 +1256,101 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			description: $("#tb-d-desc", mask).value
 		});
 		const close = () => mask.remove();
-		const reload = async () => { close(); await openDetail(id); };
+		// 原地重建弹窗（用变更接口返回的最新任务，不重新请求）
+		const rerender = (t) => { mask.remove(); buildDetail(t); };
 		const patch = async (body) => { const { task: t } = await api(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(body) }); await refreshTasks(); return t; };
 
 		mask.addEventListener("click", (e) => { if (e.target === mask) close(); });
 		$('[data-act="cancel"]', mask).addEventListener("click", close);
 		$('[data-act="save"]', mask).addEventListener("click", async () => {
-			try { await patch(state()); refreshAll(); reload(); } catch (err) { alert(`保存失败：${err.message}`); }
+			try {
+				// 保存表单字段
+				const updated = await patch(state());
+				rerender(updated);
+				toast("✓ 已保存");
+			} catch (err) { alert(`保存失败：${err.message}`); }
 		});
 		$('[data-act="del"]', mask).addEventListener("click", async () => {
 			if (!confirm(`删除任务「${task.title}」？`)) return;
 			try { await api(`/tasks/${id}`, { method: "DELETE" }); close(); await refreshAll(); } catch (err) { alert(`删除失败：${err.message}`); }
 		});
+		$('[data-act="copyctx"]', mask)?.addEventListener("click", copyCtx);
 		$("#tb-d-note", mask).addEventListener("keydown", async (e) => {
 			if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
 				const text = $("#tb-d-note", mask).value.trim();
 				if (!text) return;
-				await api(`/tasks/${id}/notes`, { method: "POST", body: JSON.stringify({ text }) });
-				await refreshTasks();
-				reload();
+				try {
+					const { task: nt } = await api(`/tasks/${id}/notes`, { method: "POST", body: JSON.stringify({ text }) });
+					await refreshTasks();
+					rerender(nt);
+					toast("✓ 进展已记录");
+				} catch (err) { alert(`记录失败：${err.message}`); }
 			}
 		});
-		$("#tb-d-sess-link", mask).addEventListener("click", async () => {
-			const sid = $("#tb-d-sess-pick", mask).value;
-			if (!sid) return;
-			await api(`/tasks/${id}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: sid, action: "link" }) });
-			await refreshTasks();
-			reload();
+		// 🔍 选择会话关联：搜索 + 按工作区分组 + 按更新时间排序
+		$("#tb-d-sess-open", mask)?.addEventListener("click", () => {
+			openSessionPicker(id, (lk) => { mask.remove(); buildDetail(lk); });
 		});
 		$$("#tb-d-sessions [data-act]", mask).forEach((btn) => btn.addEventListener("click", async () => {
 			const sid = btn.dataset.sid;
 			if (btn.dataset.act === "open") openSession(sid);
 			else {
-				await api(`/tasks/${id}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: sid, action: "unlink" }) });
+				const { task: ul } = await api(`/tasks/${id}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: sid, action: "unlink" }) });
 				await refreshTasks();
-				reload();
+				rerender(ul);
+				toast("已解除会话");
 			}
 		}));
+		// ＋ 新对话：创建一个绑定到此任务的新会话并打开
+		$("#tb-d-sess-new", mask)?.addEventListener("click", async () => {
+			await newConversationForTask(id);
+		});
+		// 状态行动按钮：AI 自动流转；用户只处理评审/确认
+		$$(".dsh-tb-statusbtn", mask).forEach((btn) => btn.addEventListener("click", async () => {
+			try {
+				const updated = await patch({ status: btn.dataset.status });
+				rerender(updated);
+				toast("✓ 状态已更新");
+			} catch (err) { alert(`状态流转失败：${err.message}`); }
+		}));
+		// ✂ 拆分：把大任务拆成多个小任务
+		$('[data-act="split"]', mask)?.addEventListener("click", () => {
+			const splitMask = document.createElement("div");
+			splitMask.className = "dsh-tb-modal-mask";
+			splitMask.innerHTML = `<div class="dsh-tb-modal">
+				<h3>拆分任务：${esc(task.title)}</h3>
+				<div class="dsh-tb-field"><label>子任务标题（每行一个，拆分后自动继承仓库/优先级/标签/关联会话）</label>
+					<textarea id="tb-split-titles" style="min-height:120px" placeholder="例如：&#10;实现功能 A&#10;实现功能 B&#10;联调与测试"></textarea></div>
+				<div class="dsh-tb-actions">
+					<button data-act="cancel">取消</button>
+					<button data-act="do" class="dsh-tb-primary">拆分</button>
+				</div>
+			</div>`;
+			document.body.appendChild(splitMask);
+			const close = () => splitMask.remove();
+			$('[data-act="cancel"]', splitMask).addEventListener("click", close);
+			splitMask.addEventListener("click", (e) => { if (e.target === splitMask) close(); });
+			$('[data-act="do"]', splitMask).addEventListener("click", async () => {
+				const titles = $("#tb-split-titles", splitMask).value.split("\n").map((s) => s.trim()).filter(Boolean);
+				if (!titles.length) { $("#tb-split-titles", splitMask).focus(); return; }
+				try {
+					const { tasks: children } = await api(`/tasks/${id}/split`, { method: "POST", body: JSON.stringify({ titles }) });
+					close();
+					await refreshAll();
+					toast(`✓ 已拆分为 ${children.length} 个子任务`);
+					if (children?.[0]) openDetail(children[0].id);
+				} catch (err) { alert(`拆分失败：${err.message}`); }
+			});
+			$("#tb-split-titles", splitMask).focus();
+		});
 	}
 
 	// ---- bootstrap ---------------------------------------------------------
 	mountView();
 	placeEntry();
-	new MutationObserver(() => { mountView(); placeEntry(); })
+	mountRecent();
+	startRecentRefresher();
+	new MutationObserver(() => { mountView(); placeEntry(); mountRecent(); })
 		.observe(document.body, { childList: true, subtree: true });
 	document.addEventListener("keydown", (e) => {
 		if (e.ctrlKey && e.shiftKey && (e.key === "B" || e.key === "b")) {
@@ -685,8 +1359,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		}
 	});
 	// When the board is open, any click on a left-sidebar item other than the
-	// taskboard entry itself switches back to the conversation (no need to
-	// click the entry again to collapse).
+	// taskboard entry itself switches back to the conversation.
 	document.addEventListener("click", (e) => {
 		if (!isOpen()) return;
 		const target = e.target;
@@ -694,4 +1367,38 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		if (target.closest(`[${ENTRY_ATTR}]`)) return;
 		if (target.closest('[data-pane="sidebar"], [class*="sidebarCol"]')) toggle(false);
 	});
+
+	// —— 会话切换后的输入区恢复 ——
+	// 从任务看板"新建对话/打开会话"走 localStorage + location.reload()。新版
+	// Harness 在 reload 恢复会话后，输入区停留在未正确初始化的状态：点输入框
+	// 没反应，必须手动左右拖拽（真实改变面板宽度）后才可输入。
+	// 原因：GUI 用 ResizeObserver 监听真实几何变化，单纯派发 window resize 事件
+	// 不会改变任何元素尺寸，Observer 不触发。这里把对话列宽度真实改小 1px 再
+	// 还原——触发一次真实尺寸变化（同帧还原，无视觉闪烁），等价于用户拖拽。
+	function forceRealReflow() {
+		const col = conversationColumn();
+		if (!col || col.clientWidth === 0) return;
+		const prev = col.style.width;
+		try {
+			col.style.width = `${col.clientWidth - 2}px`; // 真实改小 2px
+			setTimeout(() => {
+				// 保持 180ms 让 ResizeObserver 采样到变化后再还原
+				col.style.width = prev || "";
+				try { window.dispatchEvent(new Event("resize")); } catch { /* ignore */ }
+			}, 180);
+		} catch { /* ignore */ }
+	}
+	// reload 兜底路径的自动解锁：若本次加载来自「新建对话」的整页切换，
+	// 模拟一次布局分隔条拖拽（新版 Harness 需此动作才恢复输入框）。
+	try {
+		if (localStorage.getItem("dsh-taskboard.unstick") !== null) {
+			localStorage.removeItem("dsh-taskboard.unstick");
+			setTimeout(() => { simulateHandleDrag(); }, 900);
+			setTimeout(() => { simulateHandleDrag(); }, 2000);
+		}
+	} catch { /* ignore */ }
+	const nudgeTimers = [400, 1000, 2000];
+	const runNudges = () => { for (const t of nudgeTimers) setTimeout(forceRealReflow, t); };
+	if (document.readyState === "loading") window.addEventListener("load", runNudges);
+	else runNudges();
 })();
