@@ -1,6 +1,6 @@
 {
   "name": "dsh-taskboard",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "DSH web plugin: a lightweight Jira-like task board (repo/feature tasks, status/priority/progress, review & test status, notes timeline, session link + one-click resume). JSON-file storage, vanilla JS client — no SQLite, no framework.",
   "type": "module",
   "main": "lib/index.js",
@@ -17,7 +17,7 @@
   "license": "MIT",
   "scripts": {
     "build:client": "node scripts/build-client.mjs",
-    "test": "node test/seed_no_turn_events.test.mjs && node test/session_index_cold.test.mjs && node test/session_index_empty.test.mjs && node test/persistence_concurrency.test.mjs && node test/skill_registration.test.mjs"
+    "test": "node test/seed_no_turn_events.test.mjs && node test/session_index_cold.test.mjs && node test/session_index_empty.test.mjs && node test/no_session_writes.test.mjs && node test/persistence_concurrency.test.mjs && node test/skill_registration.test.mjs"
   },
   "repository": {
     "type": "git",

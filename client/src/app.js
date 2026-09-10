@@ -1141,7 +1141,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 						pickMask.remove();
 						await refreshTasks();
 						onLinked(lk);
-						toast(injected ? "✓ 已关联会话（已注入任务上下文）" : (injectionNote || "已关联会话"));
+						toast(injected === true ? "✓ 已关联会话" : (injectionNote || "已关联会话"));
 					} catch (err) { alert(`关联失败：${err.message}`); }
 				}));
 			};
@@ -1182,7 +1182,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				<div class="dsh-tb-field"><label>标签</label><input id="tb-d-labels" value="${esc((task.labels || []).join(", "))}" placeholder="逗号分隔" list="tb-labels-datalist2" /><datalist id="tb-labels-datalist2">${allLabels.map((l) => `<option value="${esc(l)}"></option>`).join("")}</datalist></div>
 			</div>
 			<div class="dsh-tb-field"><label>描述</label><textarea id="tb-d-desc">${esc(task.description || "")}</textarea></div>
-			<div class="dsh-tb-field"><label>共享上下文（池内会话可访问：新对话自动带、关联会话自动注入、也可复制随时取最新版）</label>
+			<div class="dsh-tb-field"><label>共享上下文（新对话自动带；已有关联会话用「📋 复制」粘贴，或让会话里的 agent 用 task-by-session 自取）</label>
 				<div class="dsh-tb-ctx">
 					<div class="dsh-tb-ctx-body" id="tb-d-ctx-body">加载中…</div>
 					<div class="dsh-tb-ctx-actions">
