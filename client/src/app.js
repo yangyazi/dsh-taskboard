@@ -435,6 +435,10 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			.filter((x) => x && x.updatedAt)
 			.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) {
 			if (seen.has(s.id)) continue;
+			// 标题退化成裸 session id 或宿主标记为空壳（empty）的行不进小组件：
+			// 它们不是"对话"，摆在这里只会挤掉真正的最近对话。
+			// 任务详情里的关联列表不受此过滤影响。
+			if (s.empty === true || titleKeyOf(s) === String(s.id)) continue;
 			seen.add(s.id);
 			out.push(s);
 			if (out.length >= RECENT_LIMIT) break;
