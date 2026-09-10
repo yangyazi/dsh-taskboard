@@ -17,7 +17,7 @@
   "license": "MIT",
   "scripts": {
     "build:client": "esbuild client/src/app.js --bundle --minify --format=iife --target=es2020 --outfile=client-dist/app.js",
-    "test": "node test/persistence_concurrency.test.mjs && node test/skill_registration.test.mjs"
+    "test": "node test/seed_no_turn_events.test.mjs && node test/persistence_concurrency.test.mjs && node test/skill_registration.test.mjs"
   },
   "repository": {
     "type": "git",
