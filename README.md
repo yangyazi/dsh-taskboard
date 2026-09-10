@@ -11,27 +11,51 @@
 - **看板**：待办 / 进行中 / 评审中 / 已阻塞 / 已完成 五列，卡片显示优先级/仓库/feature/进度/review/测试徽标；支持搜索与仓库过滤
 - **任务字段**：标题、仓库、分支/feature、描述、状态、优先级、进度(0-100)、评审状态、测试状态
 - **进展记录**：任务内时间线式评论（Ctrl+Enter 快速提交）
-- **会话关联**：任务可关联多个 DSH 会话，点「打开」直接恢复该对话继续（localStorage `dsh.sessions.current` + reload）
+- **会话关联**：任务可关联多个 DSH 会话；「＋ 新对话」走宿主原生新建（页面内，不整页刷新），新会话自动挂到任务所属工作区并绑定任务
+- **上下文共享**：agent 可在会话内用 `GET /taskboard/api/task-by-session?sessionId=<DSH_SESSION_ID>` 自取任务上下文（描述 + 全部进展记录 + 关联会话）
 - **快捷键**：`Ctrl+Shift+B` 也可开合看板
 
 ## 安装
 
-```bash
-# 1) 加入 web profile 依赖（本地开发：file:<插件目录>；npm 发布后：包名）
-cd ~/.dsh/profiles/web
-pnpm add file:<本插件目录>
+**方式一：从 GitHub 安装（推荐，无需 npm registry）**
 
-# 2) 注册行（cordis.patch.yml 追加）
+```bash
+# 插件零 npm 依赖，直接按 release tarball 安装
+dsh plugin --profile web add https://github.com/yangyazi/dsh-taskboard/archive/refs/tags/v0.1.1.tar.gz
+
+# 再往 ~/.dsh/profiles/web/cordis.patch.yml 追加注册行：
 #   - insert:
 #       - id: taskboard
 #         name: 'dsh-taskboard'
 #         config: {}
+
+# 最后重启 dsh web
+```
+
+**方式二：本地目录安装（开发）**
+
+```bash
+# 1) 加入 web profile 依赖（本地开发：file:<插件目录>）
+cd ~/.dsh/profiles/web
+pnpm add file:<本插件目录>
+
+# 2) 注册行（cordis.patch.yml 追加，同方式一）
 
 # 3) 客户端改动后重新打包
 cd <本插件目录> && npm run build:client
 
 # 4) 重启 dsh web 生效
 ```
+
+> 注意：`file:` 依赖是复制/硬链接，改源码后需重新 `pnpm add -f file:<目录>` 或手动同步到
+> profile 的 node_modules 副本，否则线上仍跑旧代码。
+
+## 版本记录
+
+| 版本 | 主要变化 |
+| --- | --- |
+| **v0.1.1** | 修复新版 Harness(0.1.2) 下「新建对话后输入框锁死、需手动拖拽」：原生会话切换不再依赖哈希类名（改为遍历 React fiber 树），新建对话走页面内原生新建；reload 兜底自动解锁；任务「最近活跃」随会话活动自动上浮；新增 `task-by-session` 接口与技能上下文自取流程 |
+| v0.1.0 | 首个发布：任务 CRUD、概览/看板/列表三视图、标签与过滤、会话关联与一键打开、进展记录 |
 
 > 说明：`file:` 方式安装时，改动源码后需重新 `pnpm add -f file:<目录>` 或同步文件到
 > profile 的 node_modules 副本（`file:` 依赖是复制/硬链接，不自动跟随源文件变更）。
