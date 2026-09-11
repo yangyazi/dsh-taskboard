@@ -1,8 +1,9 @@
 // dsh-taskboard client: lightweight Jira-like task board.
 // - LEFT-SIDEBAR entry + full center-column view
 // - views: 概览 (workspace dashboard) / 看板 (kanban) / 列表 (list)
-// - task = shared context pool: new conversations get seeded context,
-//   linked conversations get it injected; detail shows live shared context
+// - task = shared context pool: new conversations get seeded context (host path),
+//   the detail view shows live shared context and can copy it to the clipboard
+//   (no direct writes into existing session logs — see ADR-0004)
 // - labels, filters (repo/priority/status/label/search), session links + resume
 // Pure vanilla DOM. Talks to /taskboard/api/*.
 (() => {
@@ -790,20 +791,36 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	}
 
 	/**
-	* 为任务新建对话。
+	* 为任务新建对话 —— **走原生草稿流，页内切换、零 reload**。
 	*
-	* 为什么不再走"原生新建会话"：本版 Harness 的侧边栏「New Session」是**草稿态**
-	* ——点了只切换到一个空输入框，会话 id 要等用户发出第一条消息才产生。
-	* 因此 `waitForNewSession()` 永远轮询不到 id，白等满超时（实测 4.5s）才回退，
-	* 这正是用户反馈的「新建关联对话很卡」。
+	* 历史教训（两种做法都被用户打回）：
+	*   ① 先试原生 + `waitForNewSession(4500)`：本版 Harness 的侧边栏「New Session」
+	*      是**草稿态**，发消息前不产生会话 id → 轮询必然超时，白等 4.5s（"很卡"）。
+	*   ② 直接 host 建冷会话 + `location.reload()`：跳转依赖"整页加载后恢复选择"，
+	*      而恢复要满足一堆条件（cookie/token 有效、目标会话在客户端列表里……），
+	*      实测在用户浏览器里经常落不到新对话（"不跳转新对话"）。
 	*
-	* 现在直接走 host：建一个带任务共享上下文的**冷**会话（id 立刻返回、约 0.3s、
-	* 且 host 侧已自动绑定到任务）→ 立刻尝试页内打开 → 拿不到原生 open 才整页加载。
+	* 现在：点「＋新对话」= 点击宿主原生「New Session」（页内立即切到新草稿，不 reload），
+	* 关掉任务看板让用户直接看到输入框；新会话 id 在用户**发送第一条消息**时产生，
+	* 插件在后台等它出现后自动绑定到任务（并提示）。
+	* 任务上下文同时复制到剪贴板，粘一下即用；原生按钮找不到时才回退旧的 host 路径。
 	*/
 	async function newConversationForTask(taskId) {
+		const before = currentSessionId();
+		let known = new Set();
+		try { known = new Set((await api("/sessions")).sessions.map((x) => normSid(x.id))); } catch { /* ignore */ }
+		if (startNativeSession()) {
+			// 关掉任务看板（含弹窗），让对话区重新可见
+			if (isOpen()) toggle(false);
+			$$(".dsh-tb-modal-mask").forEach((m) => m.remove());
+			copyTaskContext(taskId);
+			toast("已进入新对话：发送第一条消息后自动绑定到该任务");
+			watchFirstSend(taskId, before, known);
+			return true;
+		}
+		// 兜底：host 建带种子的冷会话后打开（原生按钮不可用时才会走到）
 		try {
 			const { sessionId } = await api(`/tasks/${taskId}/session`, { method: "POST", body: "{}" });
-			// 整页加载会丢掉 toast，用标记在加载后补提示。
 			setPendingToast("✓ 已新建对话并绑定到该任务");
 			openSession(sessionId);
 			return true;
@@ -811,6 +828,44 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			alert(`新建对话失败：${err.message}`);
 			return false;
 		}
+	}
+	/** 点击宿主原生「New Session」（页内草稿态，不整页加载）。 */
+	function startNativeSession() {
+		const btn = document.querySelector('button[class*="newSession"]');
+		if (btn !== null) { btn.click(); return true; }
+		const caps = discoverNativeCapabilities();
+		if (typeof caps.startSession === "function") {
+			try { caps.startSession(); return true; } catch { /* fall through */ }
+		}
+		return false;
+	}
+	/** 把任务共享上下文复制到剪贴板（best-effort，失败不提示错误）。 */
+	function copyTaskContext(taskId) {
+		api(`/tasks/${taskId}/context`).then((r) => {
+			const text = r?.context;
+			if (typeof text !== "string" || !text) return;
+			return navigator.clipboard?.writeText?.(text);
+		}).catch(() => {});
+	}
+	/**
+	* 等用户在新草稿里发出第一条消息（= 新会话 id 出现），把它绑定到任务。
+	* 只绑"点按钮之前不存在"的会话，避免用户自己切到别的会话时误绑。
+	*/
+	function watchFirstSend(taskId, before, known) {
+		const deadline = Date.now() + 30 * 60 * 1000;
+		const timer = setInterval(async () => {
+			const cur = currentSessionId();
+			if (cur !== null && cur !== before && !known.has(cur)) {
+				clearInterval(timer);
+				try {
+					await api(`/tasks/${taskId}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: cur, action: "link" }) });
+					toast("✓ 已把新对话绑定到该任务");
+					refreshTasks();
+				} catch { /* 绑定失败不影响对话 */ }
+				return;
+			}
+			if (Date.now() > deadline) clearInterval(timer);
+		}, 1000);
 	}
 	/** 跨整页加载的提示：写入标记，页面加载完成后由 boot 段补弹。 */
 	function setPendingToast(text) {

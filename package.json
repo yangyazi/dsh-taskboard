@@ -1,6 +1,6 @@
 {
   "name": "dsh-taskboard",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "DSH web plugin: a lightweight Jira-like task board (repo/feature tasks, status/priority/progress, review & test status, notes timeline, session link + one-click resume). JSON-file storage, vanilla JS client — no SQLite, no framework.",
   "type": "module",
   "main": "lib/index.js",
