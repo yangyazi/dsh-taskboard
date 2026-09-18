@@ -669,10 +669,26 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	}
 	function startRecentRefresher() {
 		if (recentRefreshTimer !== null) return;
+		// 轮询周期从 60s 缩到 15s：新建的对话要尽快出现在这里（一次请求很轻）
 		recentRefreshTimer = setInterval(() => {
 			if (document.hidden) return;
 			refreshRecent();
-		}, 60000);
+		}, 15000);
+		// 回到前台/切回页面时立刻刷一次（用户最可能在这时候看列表）
+		window.addEventListener("focus", () => refreshRecent());
+		document.addEventListener("visibilitychange", () => {
+			if (!document.hidden) refreshRecent();
+		});
+		// 当前会话一变就刷新：原生「新建对话」发出第一条消息后会话才真正存在，
+		// 这里 2s 内就能把它带进「最新对话」，不用等定时器。
+		let lastCurrent = currentSessionId();
+		setInterval(() => {
+			if (document.hidden) return;
+			const cur = currentSessionId();
+			if (cur === lastCurrent) return;
+			lastCurrent = cur;
+			refreshRecent();
+		}, 2000);
 	}
 
 	function bindViewEvents() {
