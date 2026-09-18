@@ -410,6 +410,10 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	const RECENT_EXPANDED_KEY = "dsh-tb-recent-expanded";
 	let recentExpanded = false;
 	let recentHidden = new Set();
+	let recentAll = [];              // 最近一次拉取的完整列表：渲染只读它，切换展开/滚动不再发请求
+	let recentRenderCount = 15;      // 当前渲染条数（增量渲染窗口）
+	const RECENT_CHUNK = 50;         // 每次滚动到底追加多少条
+	const readCursorCache = new Map();
 	try {
 		recentExpanded = localStorage.getItem(RECENT_EXPANDED_KEY) === "1";
 		recentHidden = new Set(JSON.parse(localStorage.getItem(RECENT_HIDDEN_KEY) || "[]"));
@@ -465,16 +469,19 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			if (recentHidden.has(s.id)) continue;      // 用户手动"从最新里删掉"的
 			seen.add(s.id);
 			out.push(s);
-			if (!recentExpanded && out.length >= RECENT_LIMIT) break;
+			if (out.length >= (recentExpanded ? recentRenderCount : RECENT_LIMIT)) break;
 		}
 		return out;
 	}
-	/** 未截断的完整列表长度（用于"展开全部 (N)"里的 N）。 */
-	function recentTotal(all) {
-		const saved = recentExpanded;
+	/** 完整列表长度（不受渲染窗口影响），用于"展开全部 (N)"里的 N。 */
+	function recentTotal() {
+		const savedExpanded = recentExpanded;
+		const savedCount = recentRenderCount;
 		recentExpanded = true;
-		const n = recentList(all).length;
-		recentExpanded = saved;
+		recentRenderCount = Number.MAX_SAFE_INTEGER;
+		const n = recentList(recentAll).length;
+		recentExpanded = savedExpanded;
+		recentRenderCount = savedCount;
 		return n;
 	}
 	function currentSessionId() {
@@ -488,15 +495,22 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	// 点开该会话时把已读时间推进到当前，绿点即消失；切到别的会话不影响它的已读状态。
 	function readCursorKey(sid) { return `dsh-tb-read:${sid}`; }
 	function readCursorOf(sid) {
-		try { return Number(localStorage.getItem(readCursorKey(sid))) || 0; } catch { return 0; }
+		if (readCursorCache.has(sid)) return readCursorCache.get(sid);
+		let v = 0;
+		try { v = Number(localStorage.getItem(readCursorKey(sid))) || 0; } catch { /* ignore */ }
+		readCursorCache.set(sid, v);
+		return v;
 	}
 	function markSessionRead(sid) {
-		try { localStorage.setItem(readCursorKey(sid), String(Date.now())); } catch { /* ignore */ }
+		const now = Date.now();
+		readCursorCache.set(sid, now);
+		try { localStorage.setItem(readCursorKey(sid), String(now)); } catch { /* ignore */ }
 	}
-	function renderRecent(all) {
+	function renderRecent() {
 		if (recentBody === null) return;
-		const list = recentList(all);
-		const total = recentTotal(all);
+		const list = recentList(recentAll);
+		const total = recentTotal();
+		const keepScroll = recentBody.scrollTop;
 		const countEl = $("#dsh-recent-cnt");
 		if (countEl) {
 			// 折叠时显示"当前/总数"，让用户知道还有多少没展开
@@ -504,9 +518,11 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		}
 		const moreEl = $("#dsh-recent-more");
 		if (moreEl) {
+			const remaining = total - recentRenderCount;
 			moreEl.style.display = total > RECENT_LIMIT ? "" : "none";
-			moreEl.textContent = recentExpanded ? `▲ 收起（只看 ${RECENT_LIMIT} 条）` : `▼ 展开全部 ${total} 条`;
-			moreEl.title = recentExpanded ? `收起为最近 ${RECENT_LIMIT} 条` : `展开全部 ${total} 条（可在列表内上下滚动）`;
+			if (!recentExpanded) moreEl.textContent = `▼ 展开全部 ${total} 条`;
+			else if (remaining > 0) moreEl.textContent = `▼ 继续加载（已显示 ${recentRenderCount}/${total}，下拉自动加载）`;
+			else moreEl.textContent = `▲ 收起（只看 ${RECENT_LIMIT} 条）`;
 			moreEl.classList.toggle("open", recentExpanded);
 		}
 		const undoEl = $("#dsh-recent-undo");
@@ -556,12 +572,16 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			e.stopPropagation();
 			recentHidden.add(el.dataset.hide);
 			persistHidden();
-			refreshRecent();
+			renderRecent();                              // 本地过滤即可，无需重新请求
 			toast(`已从「最新对话」移除（点 ↺ 可恢复）`);
 		}));
+		recentBody.scrollTop = keepScroll;              // 重绘不跳动（60s 自动刷新时尤其明显）
 	}
+	/** 只负责取数（远端一次），渲染交给 renderRecent()，二者解耦。 */
 	function refreshRecent() {
-		recentData().then((all) => renderRecent(all)).catch(() => renderRecent(sessions));
+		return recentData()
+			.then((all) => { recentAll = all; renderRecent(); })
+			.catch(() => { recentAll = sessions; renderRecent(); });
 	}
 
 	function mountRecent() {
@@ -590,12 +610,28 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				e.stopPropagation();
 				refreshRecent();
 			});
-			// 底部「展开全部 / 收起」按钮：默认只显示 15 条，展开后在小组件内滚动
+			// 底部「展开全部 / 继续加载 / 收起」按钮：只调整渲染窗口，本地重绘、不发请求
 			$("#dsh-recent-more", recentEl).addEventListener("click", (e) => {
 				e.stopPropagation();
-				recentExpanded = !recentExpanded;
+				if (!recentExpanded) {
+					recentExpanded = true;
+					recentRenderCount = RECENT_LIMIT + RECENT_CHUNK;   // 先给一屏多，剩下滚动加载
+				} else if (recentRenderCount < recentTotal()) {
+					recentRenderCount += RECENT_CHUNK;
+				} else {
+					recentExpanded = false;
+					recentRenderCount = RECENT_LIMIT;
+				}
 				try { localStorage.setItem(RECENT_EXPANDED_KEY, recentExpanded ? "1" : "0"); } catch { /* ignore */ }
-				refreshRecent();
+				renderRecent();
+			});
+			// 滚到底自动追加下一批（下拉多少加载多少）
+			recentBody.addEventListener("scroll", () => {
+				if (!recentExpanded || recentBody === null) return;
+				if (recentRenderCount >= recentTotal()) return;
+				if (recentBody.scrollTop + recentBody.clientHeight < recentBody.scrollHeight - 60) return;
+				recentRenderCount += RECENT_CHUNK;
+				renderRecent();
 			});
 			// 一键恢复所有被隐藏的对话
 			$("#dsh-recent-undo", recentEl).addEventListener("click", (e) => {
@@ -606,7 +642,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				refreshRecent();
 				toast(`已恢复 ${n} 条对话`);
 			});
-			renderRecent(sessions);
+			renderRecent();
 			refreshRecent();
 		}
 		if (recentEl.parentElement === root) return;
