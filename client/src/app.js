@@ -112,7 +112,8 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-recent-head .cnt{font-weight:600;font-size:10.5px;color:#79c0ff;background:#79c0ff14;border-radius:9px;padding:0 7px;flex:none}
 .dsh-recent-refresh{background:transparent;border:0;color:var(--dsw-alias-label-secondary,#9aa7b4);cursor:pointer;font-size:12px;padding:0 2px;line-height:1;display:inline-flex}
 .dsh-recent-refresh:hover{color:var(--dsw-alias-label-primary,#e6edf3)}
-.dsh-recent-body{display:flex;flex-direction:column;gap:1px;padding:0 6px 6px;overflow:hidden}
+.dsh-recent-body{display:flex;flex-direction:column;gap:1px;padding:0 6px 6px;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin}
+.dsh-recent-refresh.on{color:#79c0ff}
 /* 单个会话行：对齐原生会话行 —— 单行 [状态点][标题(单行 ellipsis)][时间] */
 .dsh-recent-row{display:flex;align-items:center;gap:8px;height:32px;box-sizing:border-box;padding:5px 8px;border-radius:8px;cursor:pointer;min-width:0;transition:background .12s}
 .dsh-recent-row:hover{background:var(--dsw-alias-bg-layer-2,#1b2127)}
@@ -124,6 +125,10 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-recent-row .title{flex:1;min-width:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,#e6edf3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dsh-recent-row .sid{flex:none;font-size:9.5px;color:var(--dsw-alias-label-tertiary,#768390);letter-spacing:.2px}
 .dsh-recent-row .time{flex:none;font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4)}
+/* 行内"从最新里移除"按钮：hover 才显形，平时不占视觉空间（但仍占位避免行内元素跳动） */
+.dsh-recent-row .hide{flex:none;background:transparent;border:0;color:var(--dsw-alias-label-tertiary,#768390);cursor:pointer;font-size:11px;line-height:1;padding:2px 3px;border-radius:4px;opacity:0;transition:opacity .12s,color .12s}
+.dsh-recent-row:hover .hide{opacity:1}
+.dsh-recent-row .hide:hover{color:#f85149;background:#f8514918}
 /* 当前打开的会话：去掉状态点，行用与原生「选中」一致的轻微底色（无边框、无缩放） */
 .dsh-recent-row.cur{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
 .dsh-recent-row.cur .dot{display:none}
@@ -395,6 +400,19 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	// 任务看板入口之下、会话/工作区树之上），跨工作区列出最近活跃的会话，
 	// 点击任意一条即打开并继续。数据取自 taskboard 的 /sessions 索引。
 	const RECENT_LIMIT = 15;
+	// 「最新对话」的本地偏好：隐藏集合（不删会话数据，只是不在小组件里显示）+ 是否展开全部。
+	// 存 localStorage：属于"这台浏览器怎么看"，不是任务数据。
+	const RECENT_HIDDEN_KEY = "dsh-tb-recent-hidden";
+	const RECENT_EXPANDED_KEY = "dsh-tb-recent-expanded";
+	let recentExpanded = false;
+	let recentHidden = new Set();
+	try {
+		recentExpanded = localStorage.getItem(RECENT_EXPANDED_KEY) === "1";
+		recentHidden = new Set(JSON.parse(localStorage.getItem(RECENT_HIDDEN_KEY) || "[]"));
+	} catch { /* ignore */ }
+	function persistHidden() {
+		try { localStorage.setItem(RECENT_HIDDEN_KEY, JSON.stringify([...recentHidden])); } catch { /* ignore */ }
+	}
 	let recentEl = null;       // 外层容器（含头 + 列表体）
 	let recentBody = null;
 	let recentCollapsed = false;
@@ -440,11 +458,20 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			// 它们不是"对话"，摆在这里只会挤掉真正的最近对话。
 			// 任务详情里的关联列表不受此过滤影响。
 			if (s.empty === true || titleKeyOf(s) === String(s.id)) continue;
+			if (recentHidden.has(s.id)) continue;      // 用户手动"从最新里删掉"的
 			seen.add(s.id);
 			out.push(s);
-			if (out.length >= RECENT_LIMIT) break;
+			if (!recentExpanded && out.length >= RECENT_LIMIT) break;
 		}
 		return out;
+	}
+	/** 未截断的完整列表长度（用于"展开全部 (N)"里的 N）。 */
+	function recentTotal(all) {
+		const saved = recentExpanded;
+		recentExpanded = true;
+		const n = recentList(all).length;
+		recentExpanded = saved;
+		return n;
 	}
 	function currentSessionId() {
 		try {
@@ -465,10 +492,28 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	function renderRecent(all) {
 		if (recentBody === null) return;
 		const list = recentList(all);
+		const total = recentTotal(all);
 		const countEl = $("#dsh-recent-cnt");
-		if (countEl) countEl.textContent = String(list.length);
+		if (countEl) {
+			// 折叠时显示"当前/总数"，让用户知道还有多少没展开
+			countEl.textContent = recentExpanded && total > list.length ? `${list.length}` : (total > list.length ? `${list.length}/${total}` : `${list.length}`);
+		}
+		const toggleEl = $("#dsh-recent-toggle");
+		if (toggleEl) {
+			toggleEl.style.display = total > RECENT_LIMIT ? "" : "none";
+			toggleEl.textContent = recentExpanded ? "⤡" : "⤢";
+			toggleEl.title = recentExpanded ? `收起（只显示 ${RECENT_LIMIT} 条）` : `展开全部（${total} 条，可滚动）`;
+			toggleEl.classList.toggle("on", recentExpanded);
+		}
+		const undoEl = $("#dsh-recent-undo");
+		if (undoEl) {
+			undoEl.style.display = recentHidden.size > 0 ? "" : "none";
+			undoEl.title = `恢复 ${recentHidden.size} 条被隐藏的对话`;
+			undoEl.textContent = `↺${recentHidden.size}`;
+		}
+		recentBody.style.maxHeight = recentExpanded ? "72vh" : "46vh";
 		if (!list.length) {
-			recentBody.innerHTML = '<div class="dsh-recent-empty">（暂无最近会话）</div>';
+			recentBody.innerHTML = `<div class="dsh-recent-empty">${recentHidden.size > 0 ? "（都隐藏了，点 ↺ 恢复）" : "（暂无最近会话）"}</div>`;
 			return;
 		}
 		const curId = currentSessionId();
@@ -497,10 +542,18 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				<span class="title">${esc(base)}</span>
 				${dup ? `<span class="sid">${esc(shortSid(s.id))}</span>` : ""}
 				<span class="time">${fmtTime(s.updatedAt)}</span>
+				<button class="hide" data-hide="${esc(s.id)}" title="从「最新对话」里移除（不删除会话本身，可 ↺ 恢复）">✕</button>
 			</div>`;
 		}).join("");
 		$$(".dsh-recent-row", recentBody).forEach((el) => el.addEventListener("click", () => {
 			openSession(el.dataset.sid);
+		}));
+		$$(".dsh-recent-row .hide", recentBody).forEach((el) => el.addEventListener("click", (e) => {
+			e.stopPropagation();
+			recentHidden.add(el.dataset.hide);
+			persistHidden();
+			refreshRecent();
+			toast(`已从「最新对话」移除（点 ↺ 可恢复）`);
 		}));
 	}
 	function refreshRecent() {
@@ -518,6 +571,8 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				<div class="dsh-recent-head" id="dsh-recent-head">
 					<span class="arrow">▼</span><span class="title">最新对话</span>
 					<span class="cnt" id="dsh-recent-cnt">0</span>
+					<button class="dsh-recent-refresh" id="dsh-recent-undo" title="恢复隐藏的对话" style="display:none">↺</button>
+					<button class="dsh-recent-refresh" id="dsh-recent-toggle" title="展开全部" style="display:none">⤢</button>
 					<button class="dsh-recent-refresh" id="dsh-recent-refresh" title="刷新">⟳</button>
 				</div>
 				<div class="dsh-recent-body" id="dsh-recent-body"></div>`;
@@ -530,6 +585,22 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			$("#dsh-recent-refresh", recentEl).addEventListener("click", (e) => {
 				e.stopPropagation();
 				refreshRecent();
+			});
+			// 展开全部 / 收起（默认只显示 15 条；展开后在小组件内滚动）
+			$("#dsh-recent-toggle", recentEl).addEventListener("click", (e) => {
+				e.stopPropagation();
+				recentExpanded = !recentExpanded;
+				try { localStorage.setItem(RECENT_EXPANDED_KEY, recentExpanded ? "1" : "0"); } catch { /* ignore */ }
+				refreshRecent();
+			});
+			// 一键恢复所有被隐藏的对话
+			$("#dsh-recent-undo", recentEl).addEventListener("click", (e) => {
+				e.stopPropagation();
+				const n = recentHidden.size;
+				recentHidden.clear();
+				persistHidden();
+				refreshRecent();
+				toast(`已恢复 ${n} 条对话`);
 			});
 			renderRecent(sessions);
 			refreshRecent();
