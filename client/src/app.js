@@ -114,6 +114,10 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-recent-refresh:hover{color:var(--dsw-alias-label-primary,#e6edf3)}
 .dsh-recent-body{display:flex;flex-direction:column;gap:1px;padding:0 6px 6px;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin}
 .dsh-recent-refresh.on{color:#79c0ff}
+/* 列表底部的展开/收起按钮：常显、整行可点，滚动时固定在列表下方 */
+.dsh-recent-more{display:block;width:calc(100% - 12px);margin:2px 6px 6px;padding:5px 8px;background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:8px;color:var(--dsw-alias-label-secondary,#9aa7b4);font-size:11.5px;font-weight:600;cursor:pointer;text-align:center;transition:color .12s,border-color .12s,background .12s}
+.dsh-recent-more:hover{color:var(--dsw-alias-label-primary,#e6edf3);border-color:#79c0ff66;background:#79c0ff14}
+.dsh-recent-more.open{color:#79c0ff}
 /* 单个会话行：对齐原生会话行 —— 单行 [状态点][标题(单行 ellipsis)][时间] */
 .dsh-recent-row{display:flex;align-items:center;gap:8px;height:32px;box-sizing:border-box;padding:5px 8px;border-radius:8px;cursor:pointer;min-width:0;transition:background .12s}
 .dsh-recent-row:hover{background:var(--dsw-alias-bg-layer-2,#1b2127)}
@@ -126,7 +130,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-recent-row .sid{flex:none;font-size:9.5px;color:var(--dsw-alias-label-tertiary,#768390);letter-spacing:.2px}
 .dsh-recent-row .time{flex:none;font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa7b4)}
 /* 行内"从最新里移除"按钮：hover 才显形，平时不占视觉空间（但仍占位避免行内元素跳动） */
-.dsh-recent-row .hide{flex:none;background:transparent;border:0;color:var(--dsw-alias-label-tertiary,#768390);cursor:pointer;font-size:11px;line-height:1;padding:2px 3px;border-radius:4px;opacity:0;transition:opacity .12s,color .12s}
+.dsh-recent-row .hide{flex:none;background:transparent;border:0;color:var(--dsw-alias-label-tertiary,#768390);cursor:pointer;font-size:11px;line-height:1;padding:2px 4px;border-radius:4px;opacity:.35;transition:opacity .12s,color .12s,background .12s}
 .dsh-recent-row:hover .hide{opacity:1}
 .dsh-recent-row .hide:hover{color:#f85149;background:#f8514918}
 /* 当前打开的会话：去掉状态点，行用与原生「选中」一致的轻微底色（无边框、无缩放） */
@@ -498,12 +502,12 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			// 折叠时显示"当前/总数"，让用户知道还有多少没展开
 			countEl.textContent = recentExpanded && total > list.length ? `${list.length}` : (total > list.length ? `${list.length}/${total}` : `${list.length}`);
 		}
-		const toggleEl = $("#dsh-recent-toggle");
-		if (toggleEl) {
-			toggleEl.style.display = total > RECENT_LIMIT ? "" : "none";
-			toggleEl.textContent = recentExpanded ? "⤡" : "⤢";
-			toggleEl.title = recentExpanded ? `收起（只显示 ${RECENT_LIMIT} 条）` : `展开全部（${total} 条，可滚动）`;
-			toggleEl.classList.toggle("on", recentExpanded);
+		const moreEl = $("#dsh-recent-more");
+		if (moreEl) {
+			moreEl.style.display = total > RECENT_LIMIT ? "" : "none";
+			moreEl.textContent = recentExpanded ? `▲ 收起（只看 ${RECENT_LIMIT} 条）` : `▼ 展开全部 ${total} 条`;
+			moreEl.title = recentExpanded ? `收起为最近 ${RECENT_LIMIT} 条` : `展开全部 ${total} 条（可在列表内上下滚动）`;
+			moreEl.classList.toggle("open", recentExpanded);
 		}
 		const undoEl = $("#dsh-recent-undo");
 		if (undoEl) {
@@ -572,10 +576,10 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 					<span class="arrow">▼</span><span class="title">最新对话</span>
 					<span class="cnt" id="dsh-recent-cnt">0</span>
 					<button class="dsh-recent-refresh" id="dsh-recent-undo" title="恢复隐藏的对话" style="display:none">↺</button>
-					<button class="dsh-recent-refresh" id="dsh-recent-toggle" title="展开全部" style="display:none">⤢</button>
 					<button class="dsh-recent-refresh" id="dsh-recent-refresh" title="刷新">⟳</button>
 				</div>
-				<div class="dsh-recent-body" id="dsh-recent-body"></div>`;
+				<div class="dsh-recent-body" id="dsh-recent-body"></div>
+				<button class="dsh-recent-more" id="dsh-recent-more" style="display:none"></button>`;
 			recentBody = $("#dsh-recent-body", recentEl);
 			$("#dsh-recent-head", recentEl).addEventListener("click", () => {
 				recentCollapsed = !recentCollapsed;
@@ -586,8 +590,8 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				e.stopPropagation();
 				refreshRecent();
 			});
-			// 展开全部 / 收起（默认只显示 15 条；展开后在小组件内滚动）
-			$("#dsh-recent-toggle", recentEl).addEventListener("click", (e) => {
+			// 底部「展开全部 / 收起」按钮：默认只显示 15 条，展开后在小组件内滚动
+			$("#dsh-recent-more", recentEl).addEventListener("click", (e) => {
 				e.stopPropagation();
 				recentExpanded = !recentExpanded;
 				try { localStorage.setItem(RECENT_EXPANDED_KEY, recentExpanded ? "1" : "0"); } catch { /* ignore */ }
