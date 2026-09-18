@@ -283,6 +283,10 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-tb-run{color:#f2cc60;font-size:10px;border:1px solid #f2cc6066;border-radius:8px;padding:0 6px;margin-left:6px;flex:none;animation:dsh-tb-blink 1.2s ease-in-out infinite}
 @keyframes dsh-tb-blink{0%,100%{opacity:1}50%{opacity:.45}}
 .dsh-tb-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:9999;background:#1b2127;border:1px solid #3478f6;color:#e6edf3;border-radius:9px;padding:9px 20px;font-size:12.5px;font-weight:600;box-shadow:0 6px 24px rgba(0,0,0,.5);animation:dsh-tb-toast .18s ease;pointer-events:none}
+/* 带"撤销"按钮的 toast：必须可点，否则撤销点不到 */
+.dsh-tb-toast.actionable{pointer-events:auto;display:flex;align-items:center;gap:12px;padding-right:12px}
+.dsh-tb-toast button{background:#3478f6;border:0;color:#fff;border-radius:6px;padding:3px 12px;font-size:12px;font-weight:700;cursor:pointer}
+.dsh-tb-toast button:hover{background:#4b8bff}
 @keyframes dsh-tb-toast{from{opacity:0;transform:translateX(-50%) translateY(8px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 .dsh-tb-picklist{display:flex;flex-direction:column;gap:10px;max-height:48vh;overflow-y:auto;margin-top:10px}
 .dsh-tb-pick-group{border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:9px;overflow:hidden}
@@ -409,17 +413,28 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	const RECENT_HIDDEN_KEY = "dsh-tb-recent-hidden";
 	const RECENT_EXPANDED_KEY = "dsh-tb-recent-expanded";
 	let recentExpanded = false;
-	let recentHidden = new Set();
+	let recentHidden = [];              // 隐藏栈：末尾是最近隐藏的（撤销按此顺序回退）
 	let recentAll = [];              // 最近一次拉取的完整列表：渲染只读它，切换展开/滚动不再发请求
 	let recentRenderCount = 15;      // 当前渲染条数（增量渲染窗口）
 	const RECENT_CHUNK = 50;         // 每次滚动到底追加多少条
 	const readCursorCache = new Map();
 	try {
 		recentExpanded = localStorage.getItem(RECENT_EXPANDED_KEY) === "1";
-		recentHidden = new Set(JSON.parse(localStorage.getItem(RECENT_HIDDEN_KEY) || "[]"));
+		const savedHidden = JSON.parse(localStorage.getItem(RECENT_HIDDEN_KEY) || "[]");
+		recentHidden = Array.isArray(savedHidden) ? savedHidden.filter((x) => typeof x === "string") : [];
 	} catch { /* ignore */ }
+	/** 撤销栈顶那次移除（只恢复一个），并把标题回报给用户。 */
+	function undoLastHide() {
+		const sid = recentHidden[recentHidden.length - 1];
+		if (sid === undefined) return;
+		recentHidden = recentHidden.slice(0, -1);
+		persistHidden();
+		renderRecent();
+		const row = recentAll.find((x) => normSid(x.id) === normSid(sid));
+		toast(`已恢复「${row ? titleKeyOf(row) : shortSid(sid)}」`);
+	}
 	function persistHidden() {
-		try { localStorage.setItem(RECENT_HIDDEN_KEY, JSON.stringify([...recentHidden])); } catch { /* ignore */ }
+		try { localStorage.setItem(RECENT_HIDDEN_KEY, JSON.stringify(recentHidden)); } catch { /* ignore */ }
 	}
 	let recentEl = null;       // 外层容器（含头 + 列表体）
 	let recentBody = null;
@@ -466,7 +481,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			// 它们不是"对话"，摆在这里只会挤掉真正的最近对话。
 			// 任务详情里的关联列表不受此过滤影响。
 			if (s.empty === true || titleKeyOf(s) === String(s.id)) continue;
-			if (recentHidden.has(s.id)) continue;      // 用户手动"从最新里删掉"的
+			if (recentHidden.includes(s.id)) continue; // 用户手动"从最新里移除"的
 			seen.add(s.id);
 			out.push(s);
 			if (out.length >= (recentExpanded ? recentRenderCount : RECENT_LIMIT)) break;
@@ -527,13 +542,14 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		}
 		const undoEl = $("#dsh-recent-undo");
 		if (undoEl) {
-			undoEl.style.display = recentHidden.size > 0 ? "" : "none";
-			undoEl.title = `恢复 ${recentHidden.size} 条被隐藏的对话`;
-			undoEl.textContent = `↺${recentHidden.size}`;
+			// 不显示累计计数（没意义），只在有隐藏时给一个"撤销上一次移除"的入口
+			undoEl.style.display = recentHidden.length > 0 ? "" : "none";
+			undoEl.title = "撤销上一次移除（逐个恢复，不会一次全放回来）";
+			undoEl.textContent = "↺";
 		}
 		recentBody.style.maxHeight = recentExpanded ? "72vh" : "46vh";
 		if (!list.length) {
-			recentBody.innerHTML = `<div class="dsh-recent-empty">${recentHidden.size > 0 ? "（都隐藏了，点 ↺ 恢复）" : "（暂无最近会话）"}</div>`;
+			recentBody.innerHTML = `<div class="dsh-recent-empty">${recentHidden.length > 0 ? "（都移除了，点右上角 ↺ 撤销）" : "（暂无最近会话）"}</div>`;
 			return;
 		}
 		const curId = currentSessionId();
@@ -562,7 +578,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				<span class="title">${esc(base)}</span>
 				${dup ? `<span class="sid">${esc(shortSid(s.id))}</span>` : ""}
 				<span class="time">${fmtTime(s.updatedAt)}</span>
-				<button class="hide" data-hide="${esc(s.id)}" title="从「最新对话」里移除（不删除会话本身，可 ↺ 恢复）">✕</button>
+				<button class="hide" data-hide="${esc(s.id)}" title="从「最新对话」里移除（不删除会话本身；顶部 ↺ 可逐个撤销）">✕</button>
 			</div>`;
 		}).join("");
 		$$(".dsh-recent-row", recentBody).forEach((el) => el.addEventListener("click", () => {
@@ -570,10 +586,15 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		}));
 		$$(".dsh-recent-row .hide", recentBody).forEach((el) => el.addEventListener("click", (e) => {
 			e.stopPropagation();
-			recentHidden.add(el.dataset.hide);
+			const sid = el.dataset.hide;
+			const row = list.find((x) => x.id === sid);
+			recentHidden = recentHidden.filter((x) => x !== sid).concat(sid);   // 放到栈顶
 			persistHidden();
 			renderRecent();                              // 本地过滤即可，无需重新请求
-			toast(`已从「最新对话」移除（点 ↺ 可恢复）`);
+			toast(`已移除「${titleKeyOf(row ?? { id: sid })}」`, {
+				label: "撤销",
+				run: () => { undoLastHide(); }
+			});
 		}));
 		recentBody.scrollTop = keepScroll;              // 重绘不跳动（60s 自动刷新时尤其明显）
 	}
@@ -633,14 +654,10 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				recentRenderCount += RECENT_CHUNK;
 				renderRecent();
 			});
-			// 一键恢复所有被隐藏的对话
+			// 撤销上一次移除：逐个回退（不做"一键全恢复"，避免把早先故意移除的也放回来）
 			$("#dsh-recent-undo", recentEl).addEventListener("click", (e) => {
 				e.stopPropagation();
-				const n = recentHidden.size;
-				recentHidden.clear();
-				persistHidden();
-				refreshRecent();
-				toast(`已恢复 ${n} 条对话`);
+				undoLastHide();
 			});
 			renderRecent();
 			refreshRecent();
@@ -999,12 +1016,22 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		try { localStorage.setItem("dsh-taskboard.pending-toast", text); } catch { /* ignore */ }
 	}
 	// 轻量操作反馈提示
-	function toast(text) {
+	function toast(text, action) {
 		const el = document.createElement("div");
 		el.className = "dsh-tb-toast";
-		el.textContent = text;
+		const span = document.createElement("span");
+		span.textContent = text;
+		el.appendChild(span);
+		if (action !== undefined) {
+			el.classList.add("actionable");        // 带撤销按钮时要能点 → 见 CSS 的 pointer-events
+			const btn = document.createElement("button");
+			btn.type = "button";
+			btn.textContent = action.label;
+			btn.addEventListener("click", () => { el.remove(); action.run(); });
+			el.appendChild(btn);
+		}
 		document.body.appendChild(el);
-		setTimeout(() => el.remove(), 1600);
+		setTimeout(() => el.remove(), action === undefined ? 1600 : 8000);
 	}
 
 	// ---- render: overview --------------------------------------------------
