@@ -118,6 +118,11 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 .dsh-recent-more{display:block;width:calc(100% - 12px);margin:2px 6px 6px;padding:5px 8px;background:var(--dsw-alias-bg-layer-2,#1b2127);border:1px solid var(--dsw-alias-border-l2,#2a3138);border-radius:8px;color:var(--dsw-alias-label-secondary,#9aa7b4);font-size:11.5px;font-weight:600;cursor:pointer;text-align:center;transition:color .12s,border-color .12s,background .12s}
 .dsh-recent-more:hover{color:var(--dsw-alias-label-primary,#e6edf3);border-color:#79c0ff66;background:#79c0ff14}
 .dsh-recent-more.open{color:#79c0ff}
+/* 被过滤的空壳会话：淡显 + 提示条（静默过滤会让用户以为对话丢了） */
+.dsh-recent-row.filtered{opacity:.55}
+.dsh-recent-row.filtered .title{font-style:italic}
+.dsh-recent-note{display:flex;align-items:center;gap:8px;margin:0 6px 4px;padding:4px 8px;border-radius:7px;background:#79c0ff10;color:var(--dsw-alias-label-tertiary,#768390);font-size:10.5px}
+.dsh-recent-note button{background:transparent;border:0;color:#79c0ff;cursor:pointer;font-size:10.5px;font-weight:700;padding:0}
 /* 单个会话行：对齐原生会话行 —— 单行 [状态点][标题(单行 ellipsis)][时间] */
 .dsh-recent-row{display:flex;align-items:center;gap:8px;height:32px;box-sizing:border-box;padding:5px 8px;border-radius:8px;cursor:pointer;min-width:0;transition:background .12s}
 .dsh-recent-row:hover{background:var(--dsw-alias-bg-layer-2,#1b2127)}
@@ -415,6 +420,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	let recentExpanded = false;
 	let recentHidden = [];              // 隐藏栈：末尾是最近隐藏的（撤销按此顺序回退）
 	let recentAll = [];              // 最近一次拉取的完整列表：渲染只读它，切换展开/滚动不再发请求
+	let recentShowFiltered = false;  // 是否把被过滤的空壳会话也显示出来（默认藏，但界面明示数量）
 	let recentRenderCount = 15;      // 当前渲染条数（增量渲染窗口）
 	const RECENT_CHUNK = 50;         // 每次滚动到底追加多少条
 	const readCursorCache = new Map();
@@ -455,8 +461,11 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	function normalizeSessions(list) {
 		return (list || []).map((s) => (s && s.id && normSid(s.id) !== s.id ? { ...s, id: normSid(s.id) } : s));
 	}
+	// 取数只认 /sessions 一个来源；失败时**保留上一次的数据**（曾经回退到可能为空的
+	// 局部变量 sessions，一次抖动就会把列表清空，看起来像"新对话永远不出现"）。
+	let recentFetching = false;
 	function recentData() {
-		return api("/sessions").then((s) => normalizeSessions(s.sessions || [])).catch(() => sessions);
+		return api("/sessions").then((s) => normalizeSessions(s.sessions || []));
 	}
 	// 用于展示/判重的标题：有 title 用 title，否则退回 id。
 	function titleKeyOf(s) {
@@ -466,38 +475,38 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	function shortSid(sid) {
 		return String(sid).replace(/^session-/, "").slice(0, 8);
 	}
-	function recentList(all) {
-		// 只按【会话 id】去重（宿主本身已保证 id 唯一）。
-		// 绝不按标题去重：同一任务多次「＋ 新对话」的种子消息相同 → 派生标题相同，
-		// 按标题去重会把同一任务的多个关联对话合并成一条，导致「一个任务下只能看到
-		// 一个最最新的对话」。同名会话改由渲染层加短 id 后缀区分，不隐藏任何会话。
+	/**
+	* 把索引行拆成"要显示的"和"被过滤的"。
+	*
+	* 过滤只保留一条：宿主标记为空壳（empty === true，整条日志没有任何人类消息）。
+	* 之前还有两条静默过滤，会**无声吞掉真实的新对话**（标题退化成裸 id 就丢弃、
+	* 没有 updatedAt 就丢弃），已删除 —— 这正是"直接新建的对话不显示"的成因候选。
+	* 另加保险：当前正在用的会话永不隐藏；被过滤的行在界面上明示数量、可一键显示。
+	*/
+	function splitRecent(all) {
 		const seen = new Set();
-		const out = [];
-		for (const s of [...(all || [])]
-			.filter((x) => x && x.updatedAt)
-			.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) {
-			if (seen.has(s.id)) continue;
-			// 标题退化成裸 session id 或宿主标记为空壳（empty）的行不进小组件：
-			// 它们不是"对话"，摆在这里只会挤掉真正的最近对话。
-			// 任务详情里的关联列表不受此过滤影响。
-			if (s.empty === true || titleKeyOf(s) === String(s.id)) continue;
-			if (recentHidden.includes(s.id)) continue; // 用户手动"从最新里移除"的
+		const visible = [];
+		const filtered = [];
+		const curId = currentSessionId();
+		for (const s of [...(all || [])].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) {
+			if (!s || !s.id || seen.has(s.id)) continue;
 			seen.add(s.id);
-			out.push(s);
-			if (out.length >= (recentExpanded ? recentRenderCount : RECENT_LIMIT)) break;
+			if (recentHidden.includes(s.id)) continue;             // 用户手动移除（↺ 逐个撤销）
+			if (s.empty === true && s.id !== curId) { filtered.push(s); continue; }
+			visible.push(s);
 		}
-		return out;
+		return { visible, filtered };
 	}
-	/** 完整列表长度（不受渲染窗口影响），用于"展开全部 (N)"里的 N。 */
+	/** 当前要渲染的行（含渲染窗口截断）。 */
+	function recentList(all) {
+		const { visible, filtered } = splitRecent(all);
+		const rows = recentShowFiltered ? [...visible, ...filtered] : visible;
+		return rows.slice(0, recentExpanded ? recentRenderCount : RECENT_LIMIT);
+	}
+	/** 未截断的行数（"展开全部 (N)"的 N）。 */
 	function recentTotal() {
-		const savedExpanded = recentExpanded;
-		const savedCount = recentRenderCount;
-		recentExpanded = true;
-		recentRenderCount = Number.MAX_SAFE_INTEGER;
-		const n = recentList(recentAll).length;
-		recentExpanded = savedExpanded;
-		recentRenderCount = savedCount;
-		return n;
+		const { visible, filtered } = splitRecent(recentAll);
+		return recentShowFiltered ? visible.length + filtered.length : visible.length;
 	}
 	function currentSessionId() {
 		try {
@@ -523,7 +532,9 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	}
 	function renderRecent() {
 		if (recentBody === null) return;
+		const { visible, filtered } = splitRecent(recentAll);
 		const list = recentList(recentAll);
+		const filteredIds = new Set(filtered.map((x) => x.id));
 		const total = recentTotal();
 		const keepScroll = recentBody.scrollTop;
 		const countEl = $("#dsh-recent-cnt");
@@ -549,7 +560,9 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		}
 		recentBody.style.maxHeight = recentExpanded ? "72vh" : "46vh";
 		if (!list.length) {
-			recentBody.innerHTML = `<div class="dsh-recent-empty">${recentHidden.length > 0 ? "（都移除了，点右上角 ↺ 撤销）" : "（暂无最近会话）"}</div>`;
+			const why = recentHidden.length > 0 ? "（都移除了，点右上角 ↺ 撤销）" : "（暂无最近会话）";
+			recentBody.innerHTML = `<div class="dsh-recent-empty">${why}</div>`;
+			renderFilterNote(filtered.length);
 			return;
 		}
 		const curId = currentSessionId();
@@ -573,7 +586,8 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			else if (s.updatedAt && s.updatedAt > readCursorOf(s.id)) dot = `<span class="dot idle"></span>`;
 			// 原生行单行：[slot点][标题(ellipsis)][同名时的短id][时间]；无预览、无仓库胶囊。
 			// 短 id 用独立 span（flex:none），保证标题被 ellipsis 截断时它依然可见可分辨。
-			return `<div class="dsh-recent-row${isCur ? " cur" : ""}" data-sid="${esc(s.id)}" title="打开并继续：${esc(base)}（${esc(s.id)}）">
+			const dimmed = filteredIds.has(s.id) ? " filtered" : "";
+			return `<div class="dsh-recent-row${isCur ? " cur" : ""}${dimmed}" data-sid="${esc(s.id)}" title="打开并继续：${esc(base)}（${esc(s.id)}）">
 				<span class="slot">${dot}</span>
 				<span class="title">${esc(base)}</span>
 				${dup ? `<span class="sid">${esc(shortSid(s.id))}</span>` : ""}
@@ -596,13 +610,36 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 				run: () => { undoLastHide(); }
 			});
 		}));
-		recentBody.scrollTop = keepScroll;              // 重绘不跳动（60s 自动刷新时尤其明显）
+		recentBody.scrollTop = keepScroll;              // 重绘不跳动（自动刷新时尤其明显）
+		renderFilterNote(filtered.length);
 	}
-	/** 只负责取数（远端一次），渲染交给 renderRecent()，二者解耦。 */
+	/**
+	* 被过滤的行必须"说出来"：静默过滤会让用户以为对话丢了。
+	* 这里显示数量，并给一个"显示/隐藏"开关（显示时空壳行淡显 + 角标）。
+	*/
+	function renderFilterNote(count) {
+		const note = $("#dsh-recent-note");
+		if (note === null) return;
+		if (count === 0) { note.style.display = "none"; note.innerHTML = ""; return; }
+		note.style.display = "";
+		note.innerHTML = `<span>已隐藏 ${count} 条无内容的空会话</span><button type="button" id="dsh-recent-shownote">${recentShowFiltered ? "收起" : "显示"}</button>`;
+		$("#dsh-recent-shownote", note).addEventListener("click", (e) => {
+			e.stopPropagation();
+			recentShowFiltered = !recentShowFiltered;
+			renderRecent();
+		});
+	}
+	/**
+	* 取数 + 渲染。带并发保护：定时器 / 窗口聚焦 / 会话变化三处都会调它，
+	* 而宿主算一次索引要 1~2s，不做保护会叠加多个请求。
+	*/
 	function refreshRecent() {
+		if (recentFetching) return Promise.resolve();
+		recentFetching = true;
 		return recentData()
 			.then((all) => { recentAll = all; renderRecent(); })
-			.catch(() => { recentAll = sessions; renderRecent(); });
+			.catch(() => { if (recentAll.length === 0) renderRecent(); })   // 失败保留旧数据
+			.finally(() => { recentFetching = false; });
 	}
 
 	function mountRecent() {
@@ -620,6 +657,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 					<button class="dsh-recent-refresh" id="dsh-recent-refresh" title="刷新">⟳</button>
 				</div>
 				<div class="dsh-recent-body" id="dsh-recent-body"></div>
+				<div class="dsh-recent-note" id="dsh-recent-note" style="display:none"></div>
 				<button class="dsh-recent-more" id="dsh-recent-more" style="display:none"></button>`;
 			recentBody = $("#dsh-recent-body", recentEl);
 			$("#dsh-recent-head", recentEl).addEventListener("click", () => {
