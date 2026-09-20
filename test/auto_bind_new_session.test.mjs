@@ -50,13 +50,14 @@ function http(list) {
 }
 
 const regs = [];
+const liveSessions = [];          // 模拟 ctx.sessions.list()：宿主实时会话
 const ctx = {
 	effect(fn) { fn?.(); },
 	on(name, fn) { handlers.set(name, fn); },
 	logger: { info() {}, warn() {}, error() {} },
 	webServer: { register(x) { regs.push(x); }, tapIndex() {} },
 	workspaceRegistry: { list: () => [{ path: WS, title: "tb-arm-ws" }] },
-	sessions: { list: () => [], get: () => void 0 },
+	sessions: { list: () => liveSessions, get: () => void 0 },
 	sessionPersistence: { async list() { return []; }, async create() {}, async append() {} }
 };
 
@@ -115,6 +116,13 @@ await (await import("node:fs/promises")).writeFile(join(home, "storages", "taskb
 await onCreated(newSession("session-arm-stale", Date.now() + 50));
 await new Promise((r) => setTimeout(r, 50));
 check("陈旧登记不会绑到新会话", !(await linked(api, a)).includes("session-arm-stale"));
+
+// 7) 关键路径：不依赖 session/created 事件，靠轮询实时列表发现新会话
+//    （Harness 的 session/created 是按 carrier 作用域派发的，插件收不到 —— 实测踩过）
+await api("POST", `/taskboard/api/tasks/${b}/arm-session`, {});
+liveSessions.push({ id: "session-arm-poll", header: { createdAt: Date.now(), cwd: WS } });
+await new Promise((r) => setTimeout(r, 2600));      // 等一个轮询周期
+check("轮询发现的新会话自动关联", (await linked(api, b)).includes("session-arm-poll"), JSON.stringify(await linked(api, b)));
 
 console.log(failures ? "FAILURES" : "ALL OK");
 process.exit(failures ? 1 : 0);

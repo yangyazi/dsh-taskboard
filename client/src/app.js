@@ -980,20 +980,20 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 	* 任务上下文同时复制到剪贴板，粘一下即用；原生按钮找不到时才回退旧的 host 路径。
 	*/
 	async function newConversationForTask(taskId) {
-		const before = currentSessionId();
-		let known = new Set();
-		try { known = new Set((await api("/sessions")).sessions.map((x) => normSid(x.id))); } catch { /* ignore */ }
 		if (startNativeSession()) {
 			// 关掉任务看板（含弹窗），让对话区重新可见
 			if (isOpen()) toggle(false);
 			$$(".dsh-tb-modal-mask").forEach((m) => m.remove());
-			// 关键：先在【宿主】登记"下一个新会话属于本任务"。原生新建是草稿态，
-			// 会话要等第一条消息发出才诞生；绑定由宿主在 session/created 时完成，
-			// 因此刷新页面 / 切走再发消息都不会漏（页面内计时器只是兜底）。
-			api(`/tasks/${taskId}/arm-session`, { method: "POST", body: "{}" }).catch(() => {});
+			// 绑定只走宿主这一条路：先登记"下一个新会话属于本任务"，宿主在
+			// session/created（用户发出第一条消息、会话真正诞生）时完成关联。
+			// 页面内不做轮询兜底 —— 那种"见到新 id 就绑"的写法会误绑，且刷新即失效。
 			copyTaskContext(taskId);
-			toast("已进入新对话：发送第一条消息后自动绑定到该任务");
-			watchFirstSend(taskId, before, known);
+			try {
+				await api(`/tasks/${taskId}/arm-session`, { method: "POST", body: "{}" });
+				toast("已进入新对话：发送第一条消息后自动绑定到该任务");
+			} catch (err) {
+				toast(`⚠ 登记失败（不会自动绑定）：${err.message}`);
+			}
 			return true;
 		}
 		// 兜底：host 建带种子的冷会话后打开（原生按钮不可用时才会走到）
@@ -1024,26 +1024,6 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			if (typeof text !== "string" || !text) return;
 			return navigator.clipboard?.writeText?.(text);
 		}).catch(() => {});
-	}
-	/**
-	* 兜底绑定：宿主登记（arm-session）是主路径，这里只是页面内再兜一层。
-	* 只绑"点按钮之前不存在"的会话，避免用户自己切到别的会话时误绑。
-	*/
-	function watchFirstSend(taskId, before, known) {
-		const deadline = Date.now() + 30 * 60 * 1000;
-		const timer = setInterval(async () => {
-			const cur = currentSessionId();
-			if (cur !== null && cur !== before && !known.has(cur)) {
-				clearInterval(timer);
-				try {
-					await api(`/tasks/${taskId}/sessions`, { method: "POST", body: JSON.stringify({ sessionId: cur, action: "link" }) });
-					toast("✓ 已把新对话绑定到该任务");
-					refreshTasks();
-				} catch { /* 绑定失败不影响对话 */ }
-				return;
-			}
-			if (Date.now() > deadline) clearInterval(timer);
-		}, 1000);
 	}
 	/** 跨整页加载的提示：写入标记，页面加载完成后由 boot 段补弹。 */
 	function setPendingToast(text) {
