@@ -987,6 +987,10 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 			// 关掉任务看板（含弹窗），让对话区重新可见
 			if (isOpen()) toggle(false);
 			$$(".dsh-tb-modal-mask").forEach((m) => m.remove());
+			// 关键：先在【宿主】登记"下一个新会话属于本任务"。原生新建是草稿态，
+			// 会话要等第一条消息发出才诞生；绑定由宿主在 session/created 时完成，
+			// 因此刷新页面 / 切走再发消息都不会漏（页面内计时器只是兜底）。
+			api(`/tasks/${taskId}/arm-session`, { method: "POST", body: "{}" }).catch(() => {});
 			copyTaskContext(taskId);
 			toast("已进入新对话：发送第一条消息后自动绑定到该任务");
 			watchFirstSend(taskId, before, known);
@@ -1022,7 +1026,7 @@ html[${ACTIVE_ATTR}]:not([${SSH_ACTIVE_ATTR}]) [class*='centerCol'] > :not([${VI
 		}).catch(() => {});
 	}
 	/**
-	* 等用户在新草稿里发出第一条消息（= 新会话 id 出现），把它绑定到任务。
+	* 兜底绑定：宿主登记（arm-session）是主路径，这里只是页面内再兜一层。
 	* 只绑"点按钮之前不存在"的会话，避免用户自己切到别的会话时误绑。
 	*/
 	function watchFirstSend(taskId, before, known) {
